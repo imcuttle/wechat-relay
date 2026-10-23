@@ -17,5 +17,5 @@ $PY "$HERE/sound.py"
 node core/render/video.mjs "$HERE" --fps 30 --workers 6 --out "$HERE/out/video.mp4"
 sh core/render/mux.sh "$HERE/out/video.mp4" "$HERE/out/mix.wav" "$HERE/wechat-relay-promo.mp4" 30 0
 node "$HERE/tools/subs.mjs" && $PY core/render/srt.py "$HERE/out/subs.json" "$HERE/wechat-relay-promo.srt"
-node core/render/still.mjs "$HERE" 32.6 --q nosubs=1 --prefix po_ --out "$HERE/out/stills" && cp "$HERE/out/stills/po_32.6.jpg" "$HERE/poster.jpg"
+node core/render/still.mjs "$HERE" 33.4 --q nosubs=1 --prefix po_ --out "$HERE/out/stills" && cp "$HERE/out/stills/po_33.4.jpg" "$HERE/poster.jpg"
 echo "built $HERE/wechat-relay-promo.mp4"

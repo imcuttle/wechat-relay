@@ -4,3 +4,6 @@ dist/
 native/bin/
 *.log
 .DS_Store
+wechat-relay-promo/stills/
+wechat-relay-promo/voices/.cache/
+wechat-relay-promo/events.json

@@ -49,7 +49,7 @@ FIFTH = {'G2': 'D3', 'A2': 'E3', 'F#2': 'C#3', 'B1': 'F#2'}
 # intro: a soft ticking piano D that tightens as the notifications pile up
 t = .45; k = 0
 while t < T_WIN - .3:
-    N(t, 'upright', 'D4' if k % 4 else 'A4', .3, .16 + .14 * t / 3.5, -.1); t += B / 2 if t < 1.8 else B / 4; k += 1
+    N(t, 'upright', 'D4' if k % 4 else 'A4', .3, .16 + .14 * t / 3.5, -.1); t += B / 2 if (t < 1.8 or t > 2.95) else B / 4 * 2; k += 1
 rs = hp(noise(1.4), 900) * np.linspace(0, 1, int(round(1.4 * SR))) ** 2 * .1; add(band, rs.astype(np.float32), 3.55 - 1.4, 1, 0)
 
 def groove(t0, t1, full=True, hats16=False, kick=True):
@@ -128,7 +128,7 @@ NOTIF = ['A5', 'D6', 'F#5', 'A5', 'E6', 'D6', 'F#6', 'A6']
 air = lp(noise(DUR + 1.5), 600) * .012; fx += np.stack([air, np.roll(air, 999)], 1)[:NS].astype(np.float32)
 for e in E:
     t0, tp = e['t'], e['type']
-    if tp == 'notif': add(fx, chime(hz(NOTIF[e['i']]), .38) + np.pad(chime(hz(NOTIF[e['i']]) * 1.5, .22), (int(.09 * SR), 0))[:int(.9 * SR)], t0, 1, .4)
+    if tp == 'notif': add(fx, [1, .35, 1, .8, .45, 1, .8, .7][e['i']] * chime(hz(NOTIF[e['i']]), .34) + np.pad(chime(hz(NOTIF[e['i']]) * 1.5, .22), (int(.09 * SR), 0))[:int(.9 * SR)], t0, 1, .4)
     elif tp == 'click': add(fx, sclick(1.1, .8), t0, .5, .1)
     elif tp == 'whoosh': add(fx, swish(.45, .3, 300, 3500), t0 - .1, 1, (e.get('d', 0) or 0) * .4)
     elif tp == 'winopen': add(fx, swish(.6, .28, 250, 3000), t0 - .05, 1, .2); add(fx, pop(.3, 300, 700), t0 + .5, 1, .1)
@@ -147,7 +147,7 @@ for e in E:
     elif tp == 'write':
         d = .2; x = nz(d, 2500, 6000, .12) * (.6 + .4 * np.abs(np.sin(2 * np.pi * 11 * tt(d)[:int(d * SR)]))); add(fx, crush(x, 6), t0, 1, .3)
     elif tp == 'sent': add(fx, pop(.25, 700, 1300), t0, 1, 0)
-    elif tp == 'send': add(fx, swish(.8, .3, 600, 6000), t0, 1, -.3)
+    elif tp == 'send': add(fx, swish(.8, .16, 600, 6000), t0, 1, -.3)
     elif tp == 'ding': add(fx, pop(.32, 600, 1100), t0, 1, -.3); add(fx, chime(hz('D6'), .3), t0 + .04, 1, -.3)
     elif tp == 'endn': add(fx, chime(hz('A5'), .26, 1.2), t0 + .1, 1, .4); add(fx, chime(hz('D6'), .2, 1.2), t0 + .22, 1, .4)
     elif tp == 'wipe': add(fx, swish(.7, .22, 400, 5000), t0, 1, 0)
@@ -164,6 +164,7 @@ band_gate[(tn >= T_SIL) & (tn < T_PAD - .2)] = 0
 music *= band_gate[:, None]
 env = np.abs(vo[:, 0]); k = int(.12 * SR); env = np.convolve(env, np.ones(k) / k, 'same'); env = np.clip(env / (env.max() * .25), 0, 1)
 music *= (1 - .6 * env)[:, None]
+fx *= (1 - .45 * env)[:, None]
 music = music / (np.abs(music).max() + 1e-9) * .5
 fx = fx / (np.abs(fx).max() + 1e-9) * .42
 vo = vo / (np.abs(vo).max() + 1e-9) * .9

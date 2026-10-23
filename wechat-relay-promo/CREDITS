@@ -1,0 +1,12 @@
+WeChat Relay · 产品宣传片 (41 s, 1920×1080, 30 fps)
+
+Product UI: WeChat Relay's interface is redrawn in HTML/CSS from this repository's src/renderer (no screenshots). App icon: build/icon.png of this repository.
+The chat client in the film is a fictional, unbranded stand-in; all chat names and messages are invented.
+Mascot 小驿, chiptune voice, UI foley and all sound effects: original, made in code (xiaoyi.js, sound.py).
+
+Voice: Microsoft Edge neural TTS (zh-CN-YunxiNeural) via edge-tts (https://github.com/rany2/edge-tts, LGPL-3.0); use of the voice output is subject to Microsoft's service terms. Checked with faster-whisper (MIT) / Whisper small (MIT).
+Fonts (SIL Open Font License 1.1, licences in fonts/ via Google Fonts): Noto Sans SC (Google), Inter (Rasmus Andersson), JetBrains Mono (JetBrains). Subsets self-hosted.
+Icons: Lucide (ISC licence, https://lucide.dev), as used by the app.
+Drums: "MuldjordKit" by Lars Muldjord (drumgizmo.org), FreePats version, licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)
+Samples (CC0): Karoryfer Samples / sfzinstruments (jazz bass), VS Chamber Orchestra: Community Edition (Versilian Studios) (upright piano), Versilian Community Sample Library (Versilian Studios) (vibraphone, bowed vibraphone, glockenspiel, claps, shaker).
+Built with the Lemo-Opuscar tools (rendering, TTS wrappers, sampler, mastering).

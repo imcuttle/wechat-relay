@@ -5,7 +5,7 @@ import * as XY from './xiaoyi.js';
 
 export const BPM = 100, B = 60 / BPM;
 export const DUR = 41.0;
-export const VO = { v1: .5, v2: 4.5, v3: 8.6, v4: 14.8, v5: 21.6, v6: 27.8, v7: 31.05, v8: 34.6 };
+export const VO = { v1: .8, v2: 4.5, v3: 8.6, v4: 14.8, v5: 21.6, v6: 27.8, v7: 31.05, v8: 34.6 };
 let WORDS = {};
 // start (or end) of the n-th whisper word that begins with `s`
 export const W = (id, s, n = 0, end = false) => { let k = 0;
@@ -101,9 +101,9 @@ const at = (key, fx = .5, fy = 0, dx = 0, dy = 0, fb) => { let last = null; retu
 const pt = (x, y) => () => ({ x, y });
 
 // ───────── notifications at the top
-const NT = [[.45, '产品组', '李雷：下午评审改到 3 点', 4], [.98, '王总', '报价单什么时候能发？今天能给吗', 0], [1.42, '家庭群', '妈妈：周末回来吃饭吗？', 9],
-  [1.8, '产品组', '韩梅梅：@所有人 版本冻结提前到周五', 6], [2.1, '快递通知', '您的快递已到驿站', 1], [2.34, '家庭群', '妈妈：[图片]', 23],
-  [2.54, '产品组', '李雷：收到请回复', 30], [2.7, '王总', '在吗', 0]];
+const NT = [[.3, '产品组', '李雷：下午评审改到 3 点', 4], [.95, '王总', '报价单什么时候能发？今天能给吗', 0], [1.7, '家庭群', '妈妈：周末回来吃饭吗？', 9],
+  [1.92, '产品组', '韩梅梅：@所有人 版本冻结提前到周五', 6], [2.12, '快递通知', '您的快递已到驿站', 1], [3.08, '家庭群', '妈妈：[图片]', 23],
+  [3.22, '产品组', '李雷：收到请回复', 30], [3.36, '王总', '在吗', 0]];
 const UNREAD0 = { 产品组: 3, 家庭群: 30, 快递通知: 0 };
 
 export const SUBS = [], T = {};
@@ -192,12 +192,12 @@ export function build(words, lines) {
    .stand(T.whip + .55, T.sent, at('ta', .62, 0), { eyes: 'l' });
   CUR.show(T.whip + .4, T.click2 + .55).move(T.whip + .4, T.whip + .4, pt(1700, 660)).move(T.whip + .45, T.click2 - .04, at('sendBtn', .5, .5), 30).click(T.click2);
   T.sent = T.click2 + .08; ev(T.sent, 'sent');
-  T.fly0 = T.click2 + .45; T.fly1 = 32.15; ev(T.fly0, 'send'); ev(T.fly1, 'ding');
+  T.fly0 = T.click2 + .45; T.fly1 = 32.55; ev(T.fly0, 'send'); ev(T.fly1, 'ding');
   C.jump(T.sent, T.fly0, at('draftBubble', .62, 0), at('draftBubble', .5, 0), 20)
    .stand(T.fly0, T.fly1, at('fly', .5, 0), { still: true, eyes: 'l', arms: 'up' })
    .stand(T.fly1, 35.0, at('land', .5, 0), { eyes: t => t < T.fly1 + .7 ? 'happy' : 'r', arms: t => t < T.fly1 + .7 ? 'up' : 'down' });
   cam(T.fly0, T.fly1 - T.fly0, camOn('land', 1.6, .5, .5), 'eio');
-  T.pull = 32.75; cam(T.pull, 1.7, [960, 540, 1.0], 'ss');
+  T.pull = 33.0; cam(T.pull, 1.7, [960, 540, 1.0], 'ss');
 
   // ═════ F. ending: one calm notification; 小驿 falls asleep on it
   T.endN = 34.25; ev(T.endN, 'endn');
@@ -253,7 +253,7 @@ export function frame(t) {
     R.ru = { hl: [Math.min(seg(t, T.first, T.first + .15), 1)] };
     R.dr = { text: typed(TY, REPLY, t), focus: t > T.ty0 - .2 && t < T.sent, caret: t < T.sent && (t < T.ty1 ? true : Math.floor(t * 2.4) % 2 === 0),
       agentHl: Math.max(Math.min(seg(t, T.model - .1, T.model + .2), 1 - seg(t, T.model + 1.0, T.model + 1.3)), Math.min(seg(t, T.agent - .1, T.agent + .2), 1 - seg(t, T.agent + .9, T.agent + 1.2))),
-      sent: t >= T.sent, hot: t > T.click2 - .25 && t < T.click2 + .08, bubOp: t < T.fly0 ? 1 : t < T.fly1 ? .3 : seg(t, T.fly1, T.fly1 + .3) * .7 + .3 };
+      sent: t >= T.sent, gone: t >= T.fly1, hot: t > T.click2 - .25 && t < T.click2 + .08, bubOp: t < T.fly0 ? 1 : 0 };
   }
   // flying bubble (world layer): from the draft bubble to the chat client
   if (t >= T.fly0 && t < T.fly1) F.fly = seg(t, T.fly0, T.fly1);

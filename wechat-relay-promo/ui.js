@@ -99,7 +99,7 @@ export function relayWin(r) {
   h += `</div><div class="sp"><div class="seg" data-a="seg"><span class="on" data-a="segReview">审核后发送</span><span>自动发送</span></div>
     <span class="lbl">自动操作</span><i class="sw on"><b></b></i>`;
   h += r.running ? `<span class="btn ${r.btnHot ? 'hot' : ''}" data-a="startBtn">${ic('square', 14)}停止监听</span>` : `<span class="btn primary ${r.btnHot ? 'hot' : ''}" data-a="startBtn">${ic('play', 14)}开始监听</span>`;
-  h += `</div></div><div class="rw-page">${r.page === 'dash' ? dash(r.d) : r.page === 'rules' ? rules(r.ru) : r.page === 'drafts' ? drafts(r.dr) : ''}</div></div></div>`;
+  h += `</div></div><div class="rw-page ${r.page === 'drafts' ? 'flush' : ''}">${r.page === 'dash' ? dash(r.d) : r.page === 'rules' ? rules(r.ru) : r.page === 'drafts' ? drafts(r.dr) : ''}</div></div></div>`;
   return h;
 }
 function dash(d) {
@@ -138,7 +138,10 @@ function rules(u) {
   return h + `</table></div></div>`;
 }
 function drafts(d) {
-  let h = `<div class="ptitle"><h2>${ic('inbox', 18)}待审核回复</h2><div class="seg"><span class="on">待处理</span><span>全部</span></div></div>`;
+  const todo = d.sent ? 0 : 1, bd = n => `<i class="badge ${n ? '' : 'zero'}">${n}</i>`;
+  let h = `<div class="dlay"><div class="dside"><div class="dsh">按会话</div><div class="drow on"><b>全部会话</b>${bd(todo)}</div>${d.gone ? '' : `<div class="drow"><span>王总</span>${bd(todo)}</div>`}</div><div class="dmain">`;
+  h += `<div class="ptitle"><h2>${ic('inbox', 18)}待审核回复</h2><div class="seg"><span class="on">待处理</span><span>全部</span></div></div>`;
+  if (d.gone) return h + `<div class="empty dz"><i></i>没有草稿</div></div></div>`;
   h += `<div class="card" data-a="draftCard"><div class="ch"><span><b>王总</b><span class="tag ${d.sent ? 'ok' : 'blue'}" data-a="dTag">${d.sent ? '已发送' : '待审核'}</span></span>
     <span class="sec ${d.agentHl ? 'glow' : ''}" data-a="draftExtra" style="--g:${d.agentHl || 0}">sales-bot · rule-quote · 2026/10/23 15:42:10</span></div><div class="cb">`;
   h += `<div class="sec small">触发消息</div><div class="bubble other wide">报价单什么时候能发？今天能给吗</div>`;
@@ -146,5 +149,5 @@ function drafts(d) {
     <div class="acts"><span class="btn primary sm ${d.hot ? 'hot' : ''}" data-a="sendBtn">${ic('check', 14)}发送</span><span class="btn sm">${ic('x', 14)}忽略</span></div>`;
   else h += `<div class="bubble bot wide sent" data-a="draftBubble" style="opacity:${d.bubOp ?? 1}">${esc(REPLY)}</div>
     <div class="acts" style="visibility:hidden"><span class="btn primary sm" data-a="sendBtn">${ic('check', 14)}发送</span></div>`;
-  return h + '</div></div>';
+  return h + '</div></div></div></div>';
 }
