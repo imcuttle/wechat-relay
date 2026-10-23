@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { App, Button, Empty, Image, Input, List, Popconfirm, Popover, Select, Space, Switch, Tag, Tooltip, Typography } from 'antd';
-import { MessagesSquare, Plus, RefreshCw, Send, Sparkles, Trash } from 'lucide-react';
-import type { ChatMessage, ChatSummary } from '@shared/types';
+import { MessagesSquare, Plus, RefreshCw, Send, Sparkles, Trash, UserRound } from 'lucide-react';
+import type { ChatMessage, ChatSummary, ReplyMode } from '@shared/types';
+import PersonaModal from '../components/PersonaModal';
 import { errMsg, useRelay } from '../relay';
+
+const MODE_TAG: Record<ReplyMode, string> = { review: '审核', auto: '自动' };
 
 export default function Chats() {
   const { chatVersion, config } = useRelay();
@@ -17,15 +20,19 @@ export default function Chats() {
   const [syncing, setSyncing] = useState(false);
   const [agent, setAgent] = useState<string>('');
   const [generating, setGenerating] = useState(false);
+  const [personaOpen, setPersonaOpen] = useState(false);
   const bottom = useRef<HTMLDivElement>(null);
   const activeRef = useRef<string | null>(null);
 
   useEffect(() => { void window.relay.getChats().then(setChats); }, [chatVersion]);
+  // Nothing selected (first visit, or the selected chat is gone): pick the first chat.
+  useEffect(() => { if (chats.length && !chats.some((c) => c.name === active)) setActive(chats[0].name); }, [chats, active]);
   useEffect(() => { if (active) void window.relay.getHistory(active).then(setHistory); }, [active, chatVersion]);
   useEffect(() => { bottom.current?.scrollIntoView(); }, [history]);
   // A draft belongs to one chat: never carry it over to another one.
   useEffect(() => { activeRef.current = active; setDraft(''); }, [active]);
   const current = chats.find((c) => c.name === active);
+  const refreshChats = () => window.relay.getChats().then(setChats);
 
   const send = async () => {
     if (!active || !draft.trim()) return;
@@ -95,7 +102,7 @@ export default function Chats() {
               style={{ padding: '10px 16px', cursor: 'pointer', background: c.name === active ? '#e8f8ee' : undefined }}
             >
               <List.Item.Meta
-                title={<Space size={4}>{c.name}{c.isGroup && <Tag color="blue">群</Tag>}{c.paused && <Tag>已暂停</Tag>}</Space>}
+                title={<Space size={4}>{c.name}{c.isGroup && <Tag color="blue">群</Tag>}{c.paused && <Tag>已暂停</Tag>}{c.mode !== 'inherit' && <Tag color={c.mode === 'auto' ? 'orange' : 'green'}>{MODE_TAG[c.mode]}</Tag>}{c.persona?.enabled && <Tag color="purple">人设</Tag>}</Space>}
                 description={<Typography.Text type="secondary" ellipsis style={{ fontSize: 12, maxWidth: 220 }}>{c.lastText}</Typography.Text>}
               />
             </List.Item>
@@ -107,9 +114,17 @@ export default function Chats() {
           <>
             <div style={{ padding: '12px 20px', borderBottom: '1px solid #f0f0f0', background: '#fff', display: 'flex', justifyContent: 'space-between' }}>
               <Typography.Text strong>{current.name}（{current.count} 条）</Typography.Text>
-              <Space>
+              <Space wrap>
+                <Tooltip title="该会话的发送方式，优先级高于回复规则和顶部的全局设置。审核 = 生成草稿到「待审核」；自动 = 直接发送">
+                  <Select size="small" style={{ width: 130 }} value={current.mode}
+                    onChange={(v) => void window.relay.setChatMode(current.name, v).then(refreshChats)}
+                    options={[{ value: 'inherit', label: '发送：跟随默认' }, { value: 'review', label: '发送：审核后' }, { value: 'auto', label: '发送：自动' }]} />
+                </Tooltip>
+                <Tooltip title="基于该会话的历史聊天记录，一键总结语气和风格">
+                  <Button size="small" icon={<UserRound size={14} />} type={current.persona?.enabled ? 'primary' : 'default'} ghost={!!current.persona?.enabled} onClick={() => setPersonaOpen(true)}>人设</Button>
+                </Tooltip>
                 <Tooltip title="暂停后不会对该会话自动回复">
-                  <Space size={6}>自动回复<Switch size="small" checked={!current.paused} onChange={(v) => void window.relay.setChatPaused(current.name, !v).then(() => window.relay.getChats().then(setChats))} /></Space>
+                  <Space size={6}>自动回复<Switch size="small" checked={!current.paused} onChange={(v) => void window.relay.setChatPaused(current.name, !v).then(refreshChats)} /></Space>
                 </Tooltip>
                 <Popconfirm title="同步历史？" description="在后台打开该会话并向上滚动，读取「上下文时间」（设置里可改，默认 10 分钟）内的消息，用读取结果重建本地记录（不会前置微信）" onConfirm={() => void sync()}>
                   <Button size="small" icon={<RefreshCw size={14} />} loading={syncing}>同步历史</Button>
@@ -154,6 +169,7 @@ export default function Chats() {
           </>
         ) : <Empty style={{ marginTop: 120 }} description="选择左侧会话查看记录" />}
       </div>
+      {current && <PersonaModal chat={current.name} open={personaOpen} onClose={() => setPersonaOpen(false)} onChanged={() => void refreshChats()} />}
     </div>
   );
 }

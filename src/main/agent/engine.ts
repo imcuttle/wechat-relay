@@ -16,6 +16,8 @@ export interface AgentInput {
   allHistory?: ChatMessage[];
   /** The new messages that triggered this run. */
   incoming: ChatMessage[];
+  /** Persona prompt of this chat (a full prompt template); replaces the agent's base prompt. */
+  persona?: string;
 }
 
 export interface AgentOutput { reply: string | null; skipped: boolean; reason?: string; trace: string[] }
@@ -40,7 +42,7 @@ function systemPrompt(cfg: AppConfig, agent: AgentConfig, input: AgentInput): st
     myNickname: cfg.general.myNickname || '我',
     now: dateText(),
   };
-  const base = agent.prompt ? cfg.prompts.find((p) => p.id === agent.prompt)?.content ?? '' : '';
+  const base = input.persona?.trim() || (agent.prompt ? cfg.prompts.find((p) => p.id === agent.prompt)?.content ?? '' : '');
   return render([base, agent.systemPrompt ?? ''].filter((s) => s.trim()).join('\n\n'), vars).trim();
 }
 
@@ -385,11 +387,11 @@ function parseCliResult(out: string): { text: string; sessionId?: string; error?
   return { text: out.trim() };
 }
 
-async function runHarness(cfg: AppConfig, h: HarnessConfig, agent: AgentConfig, system: string, input: AgentInput, limit: number, trace: string[]): Promise<string> {
+async function runHarness(cfg: AppConfig, h: HarnessConfig, agent: AgentConfig, system: string, input: AgentInput, limit: number, trace: string[], raw?: string): Promise<string> {
   const cwd = h.cwd ? expandEnv(h.cwd) : join(DATA_DIR, 'harness', h.id);
   mkdirSync(cwd, { recursive: true });
   const env = cleanEnv(h.env);
-  const prompt = transcript(input, agent, limit);
+  const prompt = raw ?? transcript(input, agent, limit);
 
   if (h.type === 'command') {
     const args = h.args.map((a) => render(a, { chat: input.chat, system, model: h.model ?? '' }));
@@ -412,8 +414,8 @@ async function runHarness(cfg: AppConfig, h: HarnessConfig, agent: AgentConfig, 
     }
   }
   const key = `${h.id}:${input.chat}`;
-  let session = h.sessionPerChat ? harnessSessions.get(key) : undefined;
-  if (h.sessionPerChat) {
+  let session = h.sessionPerChat && raw === undefined ? harnessSessions.get(key) : undefined;
+  if (h.sessionPerChat && raw === undefined) {
     if (!session) { session = { id: randomUUID(), started: false }; harnessSessions.set(key, session); }
     args.push(...(session.started ? ['--resume', session.id] : ['--session-id', session.id]));
   } else {
@@ -472,4 +474,28 @@ export async function runAgent(cfg: AppConfig, agentId: string, input: AgentInpu
     text = await run({ ...agent, vision: false });
   }
   return finish(text, ctx, trace);
+}
+
+/**
+ * One-off text completion with an agent's model / harness (no tools, no chat transcript): used for jobs like writing a
+ * chat persona. `system` replaces the agent's own prompts.
+ */
+export async function completeText(cfg: AppConfig, agentId: string, system: string, user: string, maxTokens = 2000): Promise<string> {
+  const base = cfg.agents.find((a) => a.id === agentId);
+  if (!base) throw new Error(`未找到 agent「${agentId}」`);
+  const agent: AgentConfig = { ...base, vision: false, temperature: 0.3, maxTokens: Math.max(maxTokens, base.maxTokens ?? 0) };
+  const trace: string[] = [];
+  const input: AgentInput = { chat: '', isGroup: false, history: [], incoming: [] };
+  if (agent.engine === 'harness') {
+    const h = cfg.harnesses.find((x) => x.id === agent.harness);
+    if (!h) throw new Error(`未找到 harness「${agent.harness}」`);
+    return (await runHarness(cfg, h, agent, system, input, 0, trace, user)).replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+  }
+  const p = cfg.providers.find((x) => x.id === agent.provider);
+  if (!p) throw new Error(`未找到模型服务「${agent.provider}」`);
+  if (!agent.model) throw new Error(`agent「${agent.id}」未设置 model`);
+  const ts: Turn[] = [{ role: 'user', parts: [{ type: 'text', text: user }] }];
+  const ad = p.type === 'anthropic' ? anthropicAdapter(p, agent, system, ts, []) : openaiAdapter(p, agent, system, ts, [], 'persona');
+  const text = await agentLoop(ad, 0, [], { chat: '', isGroup: false, history: [], skipped: null }, trace);
+  return (text ?? '').replace(/<think>[\s\S]*?<\/think>/g, '').trim();
 }

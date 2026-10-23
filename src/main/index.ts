@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { app, BrowserWindow, dialog, ipcMain, nativeImage, net, Notification, protocol, shell } from 'electron';
-import type { AppConfig, RelayEvent, TestAgentRequest, TestAgentResult, ToolConfig } from '@shared/types';
+import type { AppConfig, Persona, PersonaOptions, RelayEvent, ReplyMode, TestAgentRequest, TestAgentResult, ToolConfig } from '@shared/types';
 import { runAgent } from './agent/engine';
 import { prepareScriptTool } from './agent/scriptTools';
 import { mcpPool } from './agent/tools';
@@ -72,6 +72,33 @@ function handle<T extends unknown[], R>(channel: string, fn: (...args: T) => R |
   ipcMain.handle(channel, async (_e, ...args) => fn(...(args as T)));
 }
 
+const personaPromptId = (chat: string) => `persona-${chat.trim().replace(/\s+/g, '-')}`;
+
+function getPersona(chat: string): Persona | null {
+  const meta = store.chat(chat)?.persona;
+  if (!meta) return null;
+  return { ...meta, text: configStore.config.prompts.find((x) => x.id === meta.prompt)?.content ?? '' };
+}
+
+/** A chat's persona is a normal entry of `prompts` in the config (shown on the 提示词 page); the chat links to it. */
+function setPersona(chat: string, p: { text: string; enabled: boolean; source?: string }): Persona | null {
+  const meta = store.chat(chat)?.persona;
+  const id = meta?.prompt ?? personaPromptId(chat);
+  const next = structuredClone(configStore.config);
+  const i = next.prompts.findIndex((x) => x.id === id);
+  if (!p.text.trim()) {
+    // Only remove prompts this feature created; a linked hand-made prompt stays.
+    if (i >= 0 && id.startsWith('persona-')) { next.prompts.splice(i, 1); configStore.save(next); }
+    store.setPersona(chat, null);
+    return null;
+  }
+  const prompt = { id, name: `人设 · ${chat}`, content: p.text.trim() };
+  if (i >= 0) next.prompts[i] = { ...next.prompts[i], content: prompt.content }; else next.prompts.push(prompt);
+  configStore.save(next);
+  store.setPersona(chat, { prompt: id, enabled: p.enabled, updatedAt: Date.now(), source: p.source ?? meta?.source });
+  return getPersona(chat);
+}
+
 function registerIpc(): void {
   handle('status', () => monitor.getStatus());
   handle('start', () => monitor.start());
@@ -94,6 +121,13 @@ function registerIpc(): void {
   handle('syncHistory', (chat: string) => monitor.syncHistory(chat));
   handle('addChat', (chat: string) => monitor.addChat(chat));
   handle('generateReply', (chat: string, agent?: string) => monitor.generateReply(chat, agent));
+  handle('setChatMode', (chat: string, mode: ReplyMode | 'inherit') => store.setMode(chat, mode));
+  handle('getPersona', (chat: string) => getPersona(chat));
+  handle('setPersona', (chat: string, p: { text: string; enabled: boolean }) => setPersona(chat, p));
+  handle('generatePersona', async (chat: string, o: PersonaOptions) => {
+    const r = await monitor.generatePersona(chat, o);
+    return { persona: setPersona(chat, { text: r.text, enabled: true, source: r.source })!, count: r.count, note: r.note };
+  });
   handle('listMcpTools', async (id: string) => {
     const s = configStore.config.mcpServers.find((x) => x.id === id);
     if (!s) throw new Error('未找到 MCP server');

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { ChatMessage, ChatSummary, Draft } from '@shared/types';
+import type { ChatMessage, ChatSummary, Draft, Persona, ReplyMode } from '@shared/types';
 import { DATA_DIR } from './config';
 import { isNoiseText } from './util';
 
@@ -11,7 +11,10 @@ export function dropImages(msgs: ChatMessage[]): void {
   for (const m of msgs) if (m.image) rmSync(m.image, { force: true });
 }
 
-interface ChatState { isGroup: boolean; paused: boolean; messages: ChatMessage[]; lastReplyAt?: Record<string, number> }
+/** The persona text is a prompt in the config; the chat only links to it. */
+export type PersonaMeta = Omit<Persona, 'text'>;
+
+interface ChatState { isGroup: boolean; paused: boolean; messages: ChatMessage[]; lastReplyAt?: Record<string, number>; mode?: ReplyMode; persona?: PersonaMeta }
 interface State { chats: Record<string, ChatState>; drafts: Draft[] }
 
 /** Persisted chat history (as seen on screen + sent by the bot) and reply drafts. */
@@ -82,13 +85,32 @@ class Store {
     return Object.entries(this.s.chats)
       .map(([name, c]) => {
         const last = c.messages[c.messages.length - 1];
-        return { name, isGroup: c.isGroup, paused: c.paused, count: c.messages.length, lastAt: last?.at ?? 0, lastText: last?.image ? '[图片]' : last?.text ?? '' };
+        return { name, isGroup: c.isGroup, paused: c.paused, count: c.messages.length, lastAt: last?.at ?? 0, lastText: last?.image ? '[图片]' : last?.text ?? '', mode: (c.mode ?? 'inherit') as ReplyMode | 'inherit', persona: c.persona ? { enabled: c.persona.enabled } : undefined };
       })
       .sort((a, b) => b.lastAt - a.lastAt);
   }
 
   setPaused(name: string, paused: boolean): void { this.ensure(name, false).paused = paused; this.save(); }
-  clear(name: string): void { dropImages(this.s.chats[name]?.messages ?? []); delete this.s.chats[name]; this.save(); }
+  setMode(name: string, mode: ReplyMode | 'inherit'): void {
+    const c = this.ensure(name, false);
+    if (mode === 'inherit') delete c.mode; else c.mode = mode;
+    this.save();
+  }
+
+  setPersona(name: string, meta: PersonaMeta | null): void {
+    const c = this.ensure(name, false);
+    if (meta) c.persona = meta; else delete c.persona;
+    this.save();
+  }
+
+  /** Removes the records; a chat with its own mode / persona stays (empty) so those settings are not lost. */
+  clear(name: string): void {
+    const c = this.s.chats[name];
+    if (!c) return;
+    dropImages(c.messages);
+    if (c.mode || c.persona) { c.messages = []; delete c.lastReplyAt; } else delete this.s.chats[name];
+    this.save();
+  }
 
   lastReply(name: string, rule: string): number { return this.s.chats[name]?.lastReplyAt?.[rule] ?? 0; }
   markReply(name: string, rule: string): void {

@@ -1,4 +1,4 @@
-import { useState, type ReactElement } from 'react';
+import { Activity as KeepAlive, useState, type ReactElement } from 'react';
 import { App as AntApp, Badge, Button, Layout, Menu, Segmented, Space, Switch, Tag, Tooltip, Typography } from 'antd';
 import { Activity, Bot, Code, Cpu, FileText, Inbox, ListFilter, MessagesSquare, Play, ScrollText, Square, Wrench } from 'lucide-react';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -23,6 +23,10 @@ function Shell() {
   const [page, setPage] = useState('dashboard');
   const pendingDrafts = drafts.filter((d) => d.status === 'pending').length;
 
+  // Keep-alive: a page is mounted on first visit; hidden pages use display:none (React Activity) so nothing of them is painted.
+  const [visited, setVisited] = useState<string[]>(['dashboard']);
+  const open = (key: string) => { setPage(key); setVisited((v) => (v.includes(key) ? v : [...v, key])); };
+
   const pages: Record<string, ReactElement> = {
     dashboard: <Dashboard />, chats: <Chats />, drafts: <Drafts />, rules: <Rules />, agents: <Agents />,
     providers: <Providers />, tools: <Tools />, prompts: <Prompts />, logs: <Logs />, yaml: <YamlPage />,
@@ -44,7 +48,7 @@ function Shell() {
         <Menu
           mode="inline"
           selectedKeys={[page]}
-          onClick={(e) => setPage(e.key)}
+          onClick={(e) => open(e.key)}
           style={{ borderInlineEnd: 'none' }}
           items={[
             { key: 'dashboard', icon: icon(Activity), label: '实时监控' },
@@ -72,7 +76,7 @@ function Shell() {
           <Space className="no-drag" size={16}>
             {config && (
               <>
-                <Tooltip title="review：生成草稿需确认后发送；auto：直接发送">
+                <Tooltip title="默认发送方式：审核后发送 = 生成草稿需确认；自动发送 = 直接发送。可在「会话记录」里为单个会话单独设置，优先级高于此处">
                   <Segmented
                     size="small"
                     value={config.general.mode}
@@ -94,7 +98,13 @@ function Shell() {
               : <Button type="primary" icon={<Play size={14} />} onClick={() => window.relay.start().catch((e) => message.error(errMsg(e)))}>开始监听</Button>}
           </Space>
         </Header>
-        <Content style={{ overflow: 'hidden' }}><ErrorBoundary resetKey={page}>{pages[page]}</ErrorBoundary></Content>
+        <Content style={{ overflow: 'hidden', position: 'relative' }}>
+          {visited.map((key) => (
+            <KeepAlive key={key} mode={key === page ? 'visible' : 'hidden'}>
+              <div style={{ position: 'absolute', inset: 0 }}><ErrorBoundary resetKey={key === page}>{pages[key]}</ErrorBoundary></div>
+            </KeepAlive>
+          ))}
+        </Content>
       </Layout>
     </Layout>
   );

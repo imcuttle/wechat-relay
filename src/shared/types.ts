@@ -212,6 +212,31 @@ export interface ChatMessage {
   checked?: boolean;
 }
 
+/**
+ * Tone / style profile of one chat, injected into the agent's system prompt for that chat. The text lives in a regular
+ * prompt (`prompts[]` of the config, id = `prompt`); the chat only keeps the link and the on/off switch.
+ */
+export interface Persona {
+  /** Id of the prompt holding the text. */
+  prompt: string;
+  text: string;
+  enabled: boolean;
+  updatedAt: number;
+  /** How it was made, e.g. "最近 7 天 · 312 条 · 从微信读取"; empty when hand-written. */
+  source?: string;
+}
+
+export interface PersonaOptions {
+  /** Agent used to write the profile (default: first agent). */
+  agent?: string;
+  /** Only messages of the last N minutes; 0 = no time limit. */
+  minutes: number;
+  /** At most this many (most recent) messages. */
+  limit: number;
+  /** Scroll up in WeChat to read that range (otherwise only the stored records are used). */
+  fetch: boolean;
+}
+
 export interface ChatSummary {
   name: string;
   isGroup: boolean;
@@ -219,6 +244,9 @@ export interface ChatSummary {
   lastText: string;
   count: number;
   paused: boolean;
+  /** Per-chat send mode; 'inherit' = rule / global setting. */
+  mode: ReplyMode | 'inherit';
+  persona?: { enabled: boolean };
 }
 
 export interface Draft {
@@ -309,6 +337,13 @@ export interface RelayApi {
   addChat(chat: string): Promise<{ synced: boolean; message: string }>;
   /** Runs an agent on the stored history of `chat` and returns its reply without sending (agent: id, or by rule). */
   generateReply(chat: string, agent?: string): Promise<{ text: string | null; agent: string; reason?: string; ms: number }>;
+  /** Per-chat send mode; overrides the rule and global mode. */
+  setChatMode(chat: string, mode: ReplyMode | 'inherit'): Promise<void>;
+  getPersona(chat: string): Promise<Persona | null>;
+  /** text empty = remove the persona. */
+  setPersona(chat: string, persona: { text: string; enabled: boolean }): Promise<void>;
+  /** Reads the chat history (optionally from WeChat), has an agent summarise the tone / style, saves and returns it. */
+  generatePersona(chat: string, opts: PersonaOptions): Promise<{ persona: Persona; count: number; note?: string }>;
   testAgent(req: TestAgentRequest): Promise<TestAgentResult>;
   listMcpTools(serverId: string): Promise<Array<{ name: string; description?: string }>>;
   /** Writes a script tool's files and installs its dependencies; rejects with the npm output on failure. */

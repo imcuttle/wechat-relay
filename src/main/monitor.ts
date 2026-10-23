@@ -1,8 +1,8 @@
 import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AppConfig, ChatMessage, Draft, MonitorStatus, RuleConfig, VisionMessage } from '@shared/types';
-import { runAgent } from './agent/engine';
+import type { AppConfig, ChatMessage, Draft, MonitorStatus, PersonaOptions, RuleConfig, VisionMessage } from '@shared/types';
+import { completeText, runAgent } from './agent/engine';
 import { ContextWindows } from './agent/window';
 import { CONFIG_PATH, MEDIA_DIR } from './config';
 import { CuaDriver } from './driver';
@@ -101,6 +101,42 @@ export function scrolledBack(stored: ChatMessage[], visible: ChatMessage[]): boo
   return false;
 }
 
+const PERSONA_SYSTEM = `你是一位擅长分析聊天风格的助手。你会收到「我」与某个微信联系人（或群）的聊天记录，请总结「我」在这个会话里说话的人设、语气和风格，用来让别人代我回复时听起来就是我本人。
+
+要求：
+- 只依据「我」亲自发出的消息总结；标注「[代发]」的是机器人代发的，不要从中学习风格，只当作上下文。
+- 用中文输出，第二人称（"你"）写成给代写者的指令。只写人设与语气本身：不要写「你正在以…身份聊天」之类的开场白，也不要写回复要求、[SKIP]、模板变量，这些由系统补充。不要任何寒暄或额外解释。
+- 覆盖：与对方的关系和称呼方式；整体语气（亲昵/客气/调侃/正式…）；句子长短与节奏；口头禅、常用词、语气词、网络用语；标点、表情/emoji/表情包文字的使用习惯；常聊的话题与立场；回复习惯（秒回/简短/爱追问/爱发语音等）；需要避免的说法。
+- 末尾给出 3~5 条「我」的典型原话作为示例（原样摘录，不要编造）。
+- 总长度控制在 600 字以内，条理清晰，可使用短列表。`;
+
+/** Same structure as the default prompt (variables, group block, reply rules, [SKIP]) around the generated style text. */
+export function personaPrompt(style: string): string {
+  return `你正在以「{{myNickname}}」的身份在微信里和「{{chat}}」聊天{{#group}}（这是一个群聊，最新消息来自 {{sender}}）{{/group}}。
+今天是 {{now}}，当前时间见最新消息开头。
+
+## 与「{{chat}}」聊天时的人设与语气
+回复时严格遵循下面的语气和风格，让回复读起来就像我本人写的：
+${style.trim()}
+
+要求：
+- 像真人一样简短、口语化地回复，不要使用 Markdown，篇幅和节奏参照上面的风格。
+- 不确定或涉及金钱、承诺、隐私的事情，礼貌地表示稍后本人回复。
+- 如果对方的消息不需要回复（如表情、"好的"、群里与你无关的闲聊），调用 skip_reply 工具或只输出 [SKIP]。`;
+}
+
+function personaTranscript(chat: string, isGroup: boolean, msgs: ChatMessage[], myNickname: string): string {
+  const fmt = (t: number) => { const d = new Date(t); const p = (n: number) => String(n).padStart(2, '0'); return `${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`; };
+  const lines = msgs.map((m) => {
+    const who = m.side === 'self' ? (m.source === 'bot' ? '我[代发]' : '我') : isGroup ? m.sender || '群成员' : chat;
+    return `[${fmt(m.at)}] ${who}: ${m.text.replace(/\s+/g, ' ').slice(0, 300)}`;
+  });
+  // Keep the most recent part when the transcript is huge.
+  let total = 0, from = lines.length;
+  while (from > 0 && total + lines[from - 1].length < 60000) total += lines[--from].length + 1;
+  return `会话：${chat}（${isGroup ? '群聊' : '私聊'}）${myNickname ? `；我的昵称：${myNickname}` : ''}\n共 ${lines.length - from} 条消息：\n\n${lines.slice(from).join('\n')}\n\n请输出「我」在该会话中的人设与语气总结。`;
+}
+
 /** Serialises everything that touches the WeChat window. */
 class Mutex {
   private tail: Promise<unknown> = Promise.resolve();
@@ -144,6 +180,12 @@ export class Monitor extends EventEmitter {
     this.cfg = cfg;
     this.driver.setConfig(cfg.driver);
     if (this.status.running) this.schedule(0);
+  }
+
+  /** Text of the chat's persona prompt, when the persona is on. */
+  private personaText(chat: string): string | undefined {
+    const p = store.chat(chat)?.persona;
+    return p?.enabled ? this.cfg.prompts.find((x) => x.id === p.prompt)?.content : undefined;
   }
 
   getStatus(): MonitorStatus { return { ...this.status, busy: this.lock.busy }; }
@@ -355,7 +397,8 @@ export class Monitor extends EventEmitter {
   private async reply(p: Pending, canAct: boolean): Promise<void> {
     const agentId = p.rule.agent ?? this.cfg.agents[0]?.id;
     if (!agentId) { log.warn('没有可用的 agent'); return; }
-    const mode = p.rule.mode && p.rule.mode !== 'inherit' ? p.rule.mode : this.cfg.general.mode;
+    const chatMode = store.chat(p.chat)?.mode;
+    const mode = chatMode ?? (p.rule.mode && p.rule.mode !== 'inherit' ? p.rule.mode : this.cfg.general.mode);
     const minutes = this.cfg.general.historyMinutes;
     if (minutes > 0 && this.needBackfill.has(p.chat)) {
       try { await this.backfill(p.chat, canAct); } catch (e) {
@@ -370,7 +413,7 @@ export class Monitor extends EventEmitter {
     const t0 = Date.now();
     let out;
     try {
-      out = await runAgent(this.cfg, agentId, { chat: p.chat, isGroup: p.isGroup, history, allHistory: all, incoming: p.incoming });
+      out = await runAgent(this.cfg, agentId, { chat: p.chat, isGroup: p.isGroup, history, allHistory: all, incoming: p.incoming, persona: this.personaText(p.chat) });
     } catch (e) {
       log.error(`agent ${agentId} 失败：${errText(e)}`);
       return;
@@ -455,65 +498,75 @@ export class Monitor extends EventEmitter {
   }
 
   /**
-   * Rebuilds a chat's stored history from WeChat itself: opens the chat in the background, scrolls up until the last
-   * `historyMinutes` minutes are covered (0 = to the top, or `SYNC_MAX` messages), reads every screen, scrolls back down and replaces the records with what was read, in
-   * on-screen (= chronological) order. Bot tags and send times of messages we already knew are kept.
+   * Opens `name` in the background, scrolls up until the last `minutes` minutes are covered (0 = to the top, or `max`
+   * messages), reads every screen and scrolls back down. Returns the messages in chronological order. Must run inside
+   * the lock. `images` = also save crops of image messages (they belong to the returned messages).
+   */
+  private async readChat(name: string, o: { minutes: number; max: number; steps: number; images: boolean }): Promise<{ read: ChatMessage[]; scrolls: number; reachedTop: boolean; isGroup: boolean; now: number }> {
+    if (await this.wechat.isFrontmost()) throw new Error('微信正在前台使用中，为避免打扰暂不读取，请切到其他应用后重试');
+    let f = await this.wechat.capture();
+    const previous = f.vision.title;
+    if (!sameChat(f.vision.title, name)) {
+      try { f = await this.wechat.openChat(name, f); } catch (e) {
+        if (e instanceof NotInListError) throw new Error('微信会话列表里暂时没有该会话，请先在微信里让它出现在列表中');
+        throw e;
+      }
+    }
+    const { minutes, max } = o;
+    const now = Date.now();
+    const cutoff = minutes > 0 ? now - minutes * 60000 : 0;
+    log.info(`开始读取「${name}」的聊天记录（${minutes > 0 ? `最近 ${minutes} 分钟` : '不限时间'}，最多 ${max} 条）`);
+    // A time separator at or before the cutoff is on screen: everything older is out of range.
+    const covered = () => cutoff > 0 && items.some((m) => m.vkind === 'time' && (parseWxTime(m.text, now) ?? Infinity) <= cutoff);
+    let items = seen(f);
+    for (const m of items) if (isMsg(m)) m.id = store.id();
+    if (o.images) await this.saveImages(f, items);
+
+    let scrolls = 0, amount = 5, prev = signature(items), reachedTop = false;
+    try {
+      for (let step = 0; step < o.steps; step++) {
+        if (items.filter(isMsg).length >= max || covered()) break;
+        await this.wechat.scrollChat(f, 'up', amount);
+        scrolls++;
+        await sleep(600); // let images / earlier messages render
+        const next = await this.wechat.capture();
+        if (!sameChat(next.vision.title, name)) throw new Error(`滚动时会话变成了「${next.vision.title ?? '无'}」`);
+        f = next;
+        const older = seen(next);
+        const sig = signature(older);
+        if (sig === prev) { reachedTop = true; break; }
+        prev = sig;
+        const k = overlap(older, items);
+        if (!k) log.debug(`「${name}」向上滚动后与已读内容无重叠，可能漏掉部分消息`);
+        const add = older.slice(0, older.length - k);
+        if (!add.length) { amount = Math.min(amount * 2, 30); continue; }
+        for (const m of add) if (isMsg(m)) m.id = store.id();
+        if (o.images) await this.saveImages(next, add);
+        items = [...add, ...items];
+      }
+    } finally {
+      if (scrolls) await this.scrollToBottom(f, scrolls);
+    }
+
+    stamp(items.map((m) => ({ side: m.side, kind: m.vkind, text: m.text })), now).forEach((t, i) => { items[i].at = t; });
+    const all = items.filter(isMsg);
+    const kept = all.filter((m) => m.at >= cutoff);
+    dropImages(all.filter((m) => !kept.includes(m)));
+    const read = kept.map(toMessage);
+    if (!read.length) throw new Error('没有读取到任何消息');
+    if (this.cfg.general.restoreChat && previous && !sameChat(previous, name)) await this.wechat.openChat(previous).catch(() => undefined);
+    return { read, scrolls, reachedTop, isGroup: f.vision.isGroup, now };
+  }
+
+  /**
+   * Rebuilds a chat's stored history from WeChat itself (see readChat) over the last `historyMinutes` minutes and
+   * replaces the records with what was read. Bot tags and send times of messages we already knew are kept.
    */
   syncHistory(chat: string): Promise<{ count: number; scrolls: number; reachedTop: boolean }> {
     const name = store.summaries().find((c) => sameChat(c.name, chat))?.name ?? chat;
     if (!store.chat(name)) throw new Error(`没有「${chat}」的会话记录`);
     return this.lock.run(async () => {
-      if (await this.wechat.isFrontmost()) throw new Error('微信正在前台使用中，为避免打扰暂不同步，请切到其他应用后重试');
-      let f = await this.wechat.capture();
-      const previous = f.vision.title;
-      if (!sameChat(f.vision.title, name)) {
-        try { f = await this.wechat.openChat(name, f); } catch (e) {
-          if (e instanceof NotInListError) throw new Error('微信会话列表里暂时没有该会话，请先在微信里让它出现在列表中');
-          throw e;
-        }
-      }
-      const minutes = this.cfg.general.historyMinutes;
-      const now = Date.now();
-      const cutoff = minutes > 0 ? now - minutes * 60000 : 0;
-      log.info(`开始同步「${name}」的历史记录（${minutes > 0 ? `最近 ${minutes} 分钟` : '不限时间'}）`);
-      // A time separator at or before the cutoff is on screen: everything older is out of range.
-      const covered = () => cutoff > 0 && items.some((m) => m.vkind === 'time' && (parseWxTime(m.text, now) ?? Infinity) <= cutoff);
-      let items = seen(f);
-      for (const m of items) if (isMsg(m)) m.id = store.id();
-      await this.saveImages(f, items);
-
-      let scrolls = 0, amount = 5, prev = signature(items), reachedTop = false;
-      try {
-        for (let step = 0; step < SYNC_STEPS; step++) {
-          if (items.filter(isMsg).length >= SYNC_MAX || covered()) break;
-          await this.wechat.scrollChat(f, 'up', amount);
-          scrolls++;
-          await sleep(600); // let images / earlier messages render
-          const next = await this.wechat.capture();
-          if (!sameChat(next.vision.title, name)) throw new Error(`滚动时会话变成了「${next.vision.title ?? '无'}」`);
-          f = next;
-          const older = seen(next);
-          const sig = signature(older);
-          if (sig === prev) { reachedTop = true; break; }
-          prev = sig;
-          const k = overlap(older, items);
-          if (!k) log.debug(`「${name}」向上滚动后与已读内容无重叠，可能漏掉部分消息`);
-          const add = older.slice(0, older.length - k);
-          if (!add.length) { amount = Math.min(amount * 2, 30); continue; }
-          for (const m of add) if (isMsg(m)) m.id = store.id();
-          await this.saveImages(next, add);
-          items = [...add, ...items];
-        }
-      } finally {
-        if (scrolls) await this.scrollToBottom(f, scrolls);
-      }
-
-      stamp(items.map((m) => ({ side: m.side, kind: m.vkind, text: m.text })), now).forEach((t, i) => { items[i].at = t; });
-      const all = items.filter(isMsg);
-      const kept = all.filter((m) => m.at >= cutoff);
-      dropImages(all.filter((m) => !kept.includes(m)));
-      const read = kept.map(toMessage);
-      if (!read.length) throw new Error('没有读取到任何消息');
+      const { read, scrolls, reachedTop, isGroup, now } = await this.readChat(name, { minutes: this.cfg.general.historyMinutes, max: SYNC_MAX, steps: SYNC_STEPS, images: true });
 
       // Keep what we already knew about a message: it was sent by the bot, and when it was first seen.
       const stored = store.history(name);
@@ -530,14 +583,56 @@ export class Monitor extends EventEmitter {
       this.tagBot(name, read);
       for (let i = read.length - 2; i >= 0; i--) read[i].at = Math.min(read[i].at, read[i + 1].at);
 
-      store.ensure(name, f.vision.isGroup);
+      store.ensure(name, isGroup);
       store.replace(name, read);
       this.needBackfill.delete(name);
       this.emit('chat', name);
       log.info(`「${name}」历史同步完成：${read.length} 条（滚动 ${scrolls} 次${reachedTop ? '，已到顶部' : ''}）`);
-      if (this.cfg.general.restoreChat && previous && !sameChat(previous, name)) await this.wechat.openChat(previous).catch(() => undefined);
       return { count: read.length, scrolls, reachedTop };
     });
+  }
+
+  /**
+   * Writes the tone / style profile of a chat: reads up to `limit` messages of the last `minutes` minutes (from WeChat
+   * when `fetch`, else from the stored records), has an agent describe how I talk in this chat, and saves the result
+   * and returns it (the caller saves it as a prompt). Reading from WeChat does not touch the stored records.
+   */
+  async generatePersona(chat: string, o: PersonaOptions): Promise<{ text: string; source: string; count: number; note?: string }> {
+    const name = store.summaries().find((c) => sameChat(c.name, chat))?.name ?? chat;
+    const state = store.chat(name);
+    if (!state) throw new Error(`没有「${chat}」的会话记录`);
+    const agent = o.agent || this.cfg.agents[0]?.id;
+    if (!agent) throw new Error('没有可用的 agent');
+    const limit = Math.max(10, Math.min(1000, Math.floor(o.limit) || 400));
+    const minutes = Math.max(0, Math.floor(o.minutes) || 0);
+
+    let msgs: ChatMessage[] = [];
+    let note: string | undefined;
+    let fromWeChat = false;
+    if (o.fetch) {
+      try {
+        const r = await this.lock.run(() => this.readChat(name, { minutes, max: limit, steps: 150, images: false }));
+        msgs = r.read; fromWeChat = true;
+        this.tagBot(name, msgs);
+      } catch (e) {
+        note = `未能从微信读取（${e instanceof Error ? e.message : errText(e)}），改用本地记录`;
+        log.warn(`「${name}」${note}`);
+      }
+    }
+    if (!fromWeChat) {
+      const since = minutes > 0 ? Date.now() - minutes * 60000 : 0;
+      msgs = store.history(name).filter((m) => m.at >= since);
+    }
+    msgs = msgs.slice(-limit);
+    if (msgs.filter((m) => m.side === 'self').length < 3) throw new Error(`范围内我发出的消息不足 3 条（共 ${msgs.length} 条），样本太少无法总结语气，请扩大时间范围或先同步历史${note ? `。${note}` : ''}`);
+
+    const t0 = Date.now();
+    log.info(`「${name}」生成人设 → agent ${agent}（${msgs.length} 条）`);
+    const text = await completeText(this.cfg, agent, PERSONA_SYSTEM, personaTranscript(name, state.isGroup, msgs, this.cfg.general.myNickname));
+    if (!text) throw new Error('模型没有返回内容');
+    const source = `${minutes > 0 ? `最近 ${minutes >= 1440 ? `${Math.round(minutes / 1440)} 天` : `${minutes} 分钟`}` : '不限时间'} · ${msgs.length} 条 · ${fromWeChat ? '从微信读取' : '本地记录'}`;
+    log.info(`「${name}」人设已生成（${Date.now() - t0}ms）`);
+    return { text: personaPrompt(text), source, count: msgs.length, note };
   }
 
   private async scrollToBottom(f: Frame, scrolls: number): Promise<void> {
@@ -670,7 +765,7 @@ export class Monitor extends EventEmitter {
     if (recent.length >= Math.min(5, history.length)) history = recent;
     const t0 = Date.now();
     log.info(`「${chat}」手动生成回复 → agent ${agent}（上下文 ${history.length} 条）`);
-    const out = await runAgent(this.cfg, agent, { chat, isGroup: state.isGroup, history, allHistory: all, incoming });
+    const out = await runAgent(this.cfg, agent, { chat, isGroup: state.isGroup, history, allHistory: all, incoming, persona: this.personaText(chat) });
     for (const t of out.trace) log.debug(t);
     const ms = Date.now() - t0;
     if (out.skipped || !out.reply) return { text: null, agent, reason: out.reason ?? '智能体决定不回复', ms };
