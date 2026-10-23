@@ -1,14 +1,76 @@
-import { Alert, Button, Card, Form, Input, InputNumber, Select, Space, Switch, Tag, Typography } from 'antd';
+import { useEffect, useState } from 'react';
+import { Alert, Button, Card, Form, Input, InputNumber, Select, Space, Switch, Tag, Typography, type FormInstance } from 'antd';
 import { ListFilter, Save } from 'lucide-react';
-import type { RuleConfig } from '@shared/types';
-import ConfigList, { linesToList, listToLines } from '../components/ConfigList';
+import type { ChatSummary, RuleConfig } from '@shared/types';
+import ConfigList from '../components/ConfigList';
 import { useRelay } from '../relay';
 
 const TYPE = { any: '全部', private: '私聊', group: '群聊' };
+type ChatType = keyof typeof TYPE;
+const list = (v: unknown): string[] => (Array.isArray(v) ? v.map((x) => String(x).trim()).filter(Boolean) : []);
+
+/** Tag-style input: free text (wildcards / regex) plus suggestions of chats seen so far, filtered by chat type. */
+function ChatPicker({ chats, type, ...rest }: { chats: ChatSummary[]; type: ChatType; value?: string[]; onChange?: (v: string[]) => void; placeholder?: string }) {
+  const options = chats
+    .filter((c) => type === 'any' || (type === 'group') === c.isGroup)
+    .map((c) => ({ value: c.name, label: <Space size={4}>{c.name}{c.isGroup && <Tag color="blue" style={{ marginInlineEnd: 0 }}>群</Tag>}</Space> }));
+  return <Select mode="tags" style={{ width: 330 }} options={options} tokenSeparators={['\n']} {...rest} />;
+}
+
+/** Conditions whose fields depend on the chat type (and on each other). */
+function MatchFields({ form, chats }: { form: FormInstance; chats: ChatSummary[] }) {
+  const type = (Form.useWatch('chatType', form) ?? 'any') as ChatType;
+  const mentionOnly = Form.useWatch('mentionOnly', form) as boolean | undefined;
+  const groupish = type !== 'any' ? type === 'group' : true;
+  const scope = type === 'any' ? '（仅对群聊生效）' : '';
+  const noun = type === 'private' ? '联系人' : type === 'group' ? '群' : '会话';
+
+  // Hidden fields unmount (the modal form uses preserve={false}) and fromForm drops group-only values for 私聊,
+  // so switching the type never leaves conditions that silently can never match.
+
+  return (
+    <>
+      <Space style={{ display: 'flex' }} align="start" size={24}>
+        <Form.Item name="chatType" label="会话类型">
+          <Select style={{ width: 140 }} options={Object.entries(TYPE).map(([value, label]) => ({ value, label }))} />
+        </Form.Item>
+        {groupish && (
+          <Form.Item name="mentionOnly" label={`仅在 @我 时${scope}`} valuePropName="checked"
+            tooltip="需要在全局设置里填写「我的群昵称」，或依赖会话列表中的「有人@我」提示">
+            <Switch />
+          </Form.Item>
+        )}
+        {groupish && mentionOnly && (
+          <Form.Item name="includeAtAll" label="@所有人 也算" valuePropName="checked"><Switch /></Form.Item>
+        )}
+      </Space>
+      <Space style={{ display: 'flex' }} align="start">
+        <Form.Item name="chats" label={`${noun}（空 = 全部${noun}）`} tooltip="可输入名称、通配符 *（如 工作群*）或 /正则/，回车确认；下拉为已识别过的会话">
+          <ChatPicker chats={chats} type={type} placeholder={`全部${noun}`} />
+        </Form.Item>
+        <Form.Item name="excludeChats" label={`排除${noun}`}>
+          <ChatPicker chats={chats} type={type} placeholder="无" />
+        </Form.Item>
+      </Space>
+      <Space style={{ display: 'flex' }} align="start">
+        <Form.Item name="keywords" label="关键词（任一命中，支持 /正则/）" tooltip="空 = 不限内容">
+          <Select mode="tags" style={{ width: 330 }} open={false} placeholder="不限" tokenSeparators={[',', '，']} />
+        </Form.Item>
+        {groupish && (
+          <Form.Item name="senders" label={`群成员（发送者）${scope}`} tooltip="只回应这些人在群里发的消息；空 = 所有人">
+            <Select mode="tags" style={{ width: 330 }} open={false} placeholder="所有人" tokenSeparators={[',', '，']} />
+          </Form.Item>
+        )}
+      </Space>
+    </>
+  );
+}
 
 export default function Rules() {
-  const { config, saveConfig } = useRelay();
+  const { config, saveConfig, chatVersion } = useRelay();
   const agents = config?.agents ?? [];
+  const [chats, setChats] = useState<ChatSummary[]>([]);
+  useEffect(() => { void window.relay.getChats().then(setChats); }, [chatVersion]);
   return (
     <div className="page">
       <div className="page-title"><h2><ListFilter size={18} />回复规则</h2></div>
@@ -44,20 +106,25 @@ export default function Rules() {
             ),
           },
         ]}
-        defaults={() => ({ id: `rule-${Date.now().toString(36)}`, enabled: true, action: 'reply', agent: agents[0]?.id, mode: 'inherit', cooldownSec: 10, chatType: 'any' } as never)}
-        toForm={(r) => ({
-          ...r, ...r.match,
-          chats: listToLines(r.match.chats), excludeChats: listToLines(r.match.excludeChats),
-          keywords: listToLines(r.match.keywords), senders: listToLines(r.match.senders), chatType: r.match.chatType ?? 'any',
-        })}
-        fromForm={(v): RuleConfig => ({
-          id: String(v.id), name: (v.name as string) || undefined, enabled: Boolean(v.enabled ?? true),
-          action: v.action as RuleConfig['action'], agent: v.agent as string, mode: v.mode as RuleConfig['mode'], cooldownSec: Number(v.cooldownSec ?? 0),
-          match: {
-            chats: linesToList(v.chats), excludeChats: linesToList(v.excludeChats), chatType: v.chatType as RuleConfig['match']['chatType'],
-            mentionOnly: Boolean(v.mentionOnly), includeAtAll: Boolean(v.includeAtAll), keywords: linesToList(v.keywords), senders: linesToList(v.senders),
-          },
-        })}
+        defaults={() => ({ id: `rule-${Date.now().toString(36)}`, enabled: true, action: 'reply' as const, agent: agents[0]?.id, mode: 'inherit' as const, cooldownSec: 10, match: { chatType: 'any' as const } })}
+        toForm={(r) => ({ ...r, ...r.match, chatType: r.match.chatType ?? 'any' })}
+        fromForm={(v, prev): RuleConfig => {
+          const chatType = (v.chatType ?? 'any') as ChatType;
+          const group = chatType !== 'private';
+          const mentionOnly = group && Boolean(v.mentionOnly);
+          const reply = v.action === 'reply';
+          return {
+            id: String(v.id), name: (v.name as string) || undefined, enabled: Boolean(v.enabled ?? prev?.enabled ?? true),
+            action: v.action as RuleConfig['action'],
+            agent: reply ? (v.agent as string) : undefined,
+            mode: reply ? (v.mode as RuleConfig['mode']) : undefined,
+            cooldownSec: reply ? Number(v.cooldownSec ?? 0) : 0,
+            match: {
+              chatType, chats: list(v.chats), excludeChats: list(v.excludeChats), keywords: list(v.keywords),
+              mentionOnly, includeAtAll: mentionOnly && Boolean(v.includeAtAll), senders: group ? list(v.senders) : [],
+            },
+          };
+        }}
         modalWidth={720}
         form={(form) => (
           <>
@@ -67,19 +134,7 @@ export default function Rules() {
               <Form.Item name="enabled" label="启用" valuePropName="checked"><Switch /></Form.Item>
             </Space>
             <Typography.Title level={5}>匹配条件</Typography.Title>
-            <Space style={{ display: 'flex' }} align="start">
-              <Form.Item name="chatType" label="会话类型"><Select style={{ width: 140 }} options={Object.entries(TYPE).map(([value, label]) => ({ value, label }))} /></Form.Item>
-              <Form.Item name="mentionOnly" label="群聊仅在 @我 时" valuePropName="checked"><Switch /></Form.Item>
-              <Form.Item name="includeAtAll" label="包含 @所有人" valuePropName="checked"><Switch /></Form.Item>
-            </Space>
-            <Space style={{ display: 'flex' }} align="start">
-              <Form.Item name="chats" label="会话名（每行一个，空 = 全部）"><Input.TextArea rows={3} style={{ width: 330 }} /></Form.Item>
-              <Form.Item name="excludeChats" label="排除会话"><Input.TextArea rows={3} style={{ width: 330 }} /></Form.Item>
-            </Space>
-            <Space style={{ display: 'flex' }} align="start">
-              <Form.Item name="keywords" label="关键词（任一命中，支持 /正则/）"><Input.TextArea rows={2} style={{ width: 330 }} /></Form.Item>
-              <Form.Item name="senders" label="群成员（发送者）"><Input.TextArea rows={2} style={{ width: 330 }} /></Form.Item>
-            </Space>
+            <MatchFields form={form} chats={chats} />
             <Typography.Title level={5}>动作</Typography.Title>
             <Space style={{ display: 'flex' }} align="start">
               <Form.Item name="action" label="动作"><Select style={{ width: 120 }} options={[{ value: 'reply', label: '回复' }, { value: 'ignore', label: '忽略' }]} /></Form.Item>

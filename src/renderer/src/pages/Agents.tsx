@@ -34,6 +34,12 @@ export default function Agents() {
         ]}
         defaults={() => ({ id: `agent-${Date.now().toString(36)}`, engine: 'model', provider: config.providers[0]?.id, tools: ['builtin:time', 'builtin:skip'], maxToolRounds: 4, temperature: 0.7, prompt: config.prompts[0]?.id } as Partial<AgentConfig>)}
         modalWidth={760}
+        fromForm={(v, prev) => {
+          const a = { ...(prev ?? {}), ...v } as AgentConfig;
+          const tools = (a.tools ?? []) as string[];
+          // A harness only receives MCP servers; built-in / command tools would be silently ignored.
+          return { ...a, tools: a.engine === 'harness' ? tools.filter((t) => t.startsWith('mcp:')) : tools };
+        }}
         form={(form) => (
           <>
             <Space style={{ display: 'flex' }} align="start">
@@ -58,9 +64,20 @@ export default function Agents() {
             <Form.Item name="systemPrompt" label="附加系统提示词" tooltip="追加在模板之后，支持 {{chat}} {{sender}} {{myNickname}} {{now}} {{#group}}...{{/group}}">
               <CodeEditor language="markdown" height={120} />
             </Form.Item>
-            <Form.Item name="tools" label="工具" tooltip="Harness 引擎只会使用 mcp:* 项（通过 --mcp-config 传入），其余工具由 harness 自身管理">
-              <Select mode="multiple" options={toolOptions} />
-            </Form.Item>
+            <Form.Item noStyle shouldUpdate={(a, b) => a.engine !== b.engine || a.harness !== b.harness}>{() => {
+              if (form.getFieldValue('engine') !== 'harness') {
+                return <Form.Item name="tools" label="工具"><Select mode="multiple" options={toolOptions} /></Form.Item>;
+              }
+              const h = config.harnesses.find((x) => x.id === form.getFieldValue('harness'));
+              const mcpUsable = h && h.type !== 'command' && h.passMcpServers;
+              return (
+                <Form.Item name="tools" label="MCP 服务（传给 harness）"
+                  extra={mcpUsable ? '内置工具与自定义命令工具由 harness 自身管理，这里只能选 MCP 服务，通过 --mcp-config 传入'
+                    : h ? `该 harness ${h.type === 'command' ? '是自定义命令，不支持' : '未开启「传递 MCP 配置」，不会使用'} MCP 服务` : '请先选择 harness'}>
+                  <Select mode="multiple" disabled={!mcpUsable} options={toolOptions.filter((g) => g.label === 'MCP 服务')} />
+                </Form.Item>
+              );
+            }}</Form.Item>
           </>
         )}
       />

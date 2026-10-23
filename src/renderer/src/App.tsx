@@ -1,6 +1,7 @@
 import { useState, type ReactElement } from 'react';
 import { App as AntApp, Badge, Button, Layout, Menu, Segmented, Space, Switch, Tag, Tooltip, Typography } from 'antd';
 import { Activity, Bot, Code, Cpu, FileText, Inbox, ListFilter, MessagesSquare, Play, ScrollText, Square, Wrench } from 'lucide-react';
+import ErrorBoundary from './components/ErrorBoundary';
 import { RelayProvider, errMsg, useRelay } from './relay';
 import Dashboard from './pages/Dashboard';
 import Chats from './pages/Chats';
@@ -93,7 +94,7 @@ function Shell() {
               : <Button type="primary" icon={<Play size={14} />} onClick={() => window.relay.start().catch((e) => message.error(errMsg(e)))}>开始监听</Button>}
           </Space>
         </Header>
-        <Content style={{ overflow: 'hidden' }}>{pages[page]}</Content>
+        <Content style={{ overflow: 'hidden' }}><ErrorBoundary resetKey={page}>{pages[page]}</ErrorBoundary></Content>
       </Layout>
     </Layout>
   );

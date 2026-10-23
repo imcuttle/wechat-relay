@@ -17,6 +17,8 @@ interface Props<K extends ListKey> {
   fromForm?: (values: Record<string, unknown>, prev: Item<K> | null) => Item<K>;
   extraActions?: (item: Item<K>) => ReactNode;
   modalWidth?: number;
+  /** Extra header buttons next to 新增. */
+  extra?: ReactNode;
   sortable?: boolean;
 }
 
@@ -31,7 +33,9 @@ export default function ConfigList<K extends ListKey>(p: Props<K>) {
   const edit = (item: Item<K> | null) => {
     setEditing(item);
     form.resetFields();
-    form.setFieldsValue(item ? (p.toForm ? p.toForm(item) : item) : p.defaults());
+    // New items go through toForm too, so editors get the same value shapes (e.g. JSON text, not objects).
+    const base = item ?? (p.defaults() as Item<K>);
+    form.setFieldsValue(p.toForm ? p.toForm(base) : base);
     setOpen(true);
   };
 
@@ -64,7 +68,7 @@ export default function ConfigList<K extends ListKey>(p: Props<K>) {
   });
 
   return (
-    <Card size="small" title={p.title} extra={<Button type="primary" size="small" icon={<Plus size={14} />} onClick={() => edit(null)}>新增</Button>} style={{ marginBottom: 16 }}>
+    <Card size="small" title={p.title} extra={<Space size={8}>{p.extra}<Button type="primary" size="small" icon={<Plus size={14} />} onClick={() => edit(null)}>新增</Button></Space>} style={{ marginBottom: 16 }}>
       <Table<Item<K>>
         size="small"
         rowKey={(r) => (r as { id: string }).id}

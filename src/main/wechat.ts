@@ -1,4 +1,4 @@
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { VisionResult } from '@shared/types';
 import { CACHE_DIR } from './config';
@@ -99,39 +99,70 @@ export class WeChat {
   async capture(): Promise<Frame> {
     const w = await this.target();
     const path = join(this.frameDir, `frame-${this.frameSeq++ % 4}.png`);
-    let st: { screenshot_width?: number; screenshot_height?: number; window_bounds?: { width: number; height: number }; screenshot_file_path?: string };
+    let st: { screenshot_width?: number; screenshot_height?: number; window_bounds?: { width: number; height: number } };
+    let image: string | undefined;
     try {
-      st = structured(await this.driver.call('get_window_state', {
-        pid: w.pid, window_id: w.windowId, include_accessibility_tree: false, include_screenshot: true,
-        max_image_dimension: 4000, screenshot_out_file: path,
-      }, 15000));
+      // The screenshot must come back inline: the driver only accepts pixel-addressed input (click / type_text x,y /
+      // scroll) against a snapshot whose image was returned to this session — screenshot_out_file does not count.
+      const res = await this.driver.call('get_window_state', {
+        pid: w.pid, window_id: w.windowId, include_accessibility_tree: false, include_screenshot: true, max_image_dimension: 4000,
+      }, 15000);
+      st = structured(res);
+      image = res.content?.find((b) => b.type === 'image' && b.data)?.data;
     } catch (e) {
       this.win = null; // the window may have been recreated
       throw e;
     }
-    if (!st.screenshot_file_path) { this.win = null; throw new Error('无法截取微信窗口（窗口可能已最小化，或缺少屏幕录制权限）'); }
+    if (!image) { this.win = null; throw new Error('无法截取微信窗口（窗口可能已最小化，或缺少屏幕录制权限）'); }
+    writeFileSync(path, Buffer.from(image, 'base64'));
     const width = st.screenshot_width ?? 0, height = st.screenshot_height ?? 0;
     if (st.window_bounds) { w.width = st.window_bounds.width; w.height = st.window_bounds.height; }
     const scale = st.window_bounds?.width ? width / st.window_bounds.width : 2;
-    const vision = await this.vision.parse(st.screenshot_file_path, scale);
+    const vision = await this.vision.parse(path, scale);
     if (!vision.ok) throw new Error(`识别失败：${vision.error}`);
-    return { path: st.screenshot_file_path, scale, width, height, vision, at: Date.now() };
+    return { path, scale, width, height, vision, at: Date.now() };
   }
 
   /** Posts one input action to WeChat and raises SafetyStop if it pulled WeChat to the front. */
-  private async act(tool: 'click' | 'type_text' | 'press_key', args: Record<string, unknown>): Promise<void> {
+  private async act(tool: 'click' | 'type_text' | 'press_key' | 'scroll', args: Record<string, unknown>): Promise<void> {
     const w = await this.target();
     if (await this.isFrontmost()) throw new SafetyStop('微信正在前台使用中，暂不操作');
     await this.driver.call(tool, { pid: w.pid, window_id: w.windowId, delivery_mode: 'background', ...args });
     if (await this.isFrontmost()) throw new SafetyStop(`${tool} 导致微信被切到前台，已停止自动操作`);
   }
 
-  /** Clicks a visible session row and waits until the chat header shows it. Never uses search. */
+  /**
+   * Finds a session row, scrolling the session list in the background (wheel events over the list, no focus change):
+   * first towards the top (recent chats), then down, stopping when a scroll no longer changes the visible rows.
+   */
+  private async findSession(name: string, frame: Frame): Promise<{ f: Frame; row: Frame['vision']['sessions'][number] } | null> {
+    let f = frame;
+    const hit = () => f.vision.sessions.find((s) => sameChat(s.name, name));
+    if (hit()) return { f, row: hit()! };
+    for (const direction of ['up', 'down'] as const) {
+      for (let i = 0; i < 12; i++) {
+        const l = f.vision.layout;
+        if (!l) return null;
+        const before = f.vision.sessions.map((s) => s.name).join('|');
+        await this.act('scroll', { x: Math.round((l.listLeft + l.listRight) / 2), y: Math.round(f.height / 2), direction, amount: 10, by: 'line' });
+        await sleep(350);
+        f = await this.capture();
+        const row = hit();
+        if (row) return { f, row };
+        if (f.vision.sessions.map((s) => s.name).join('|') === before) break; // reached the end
+      }
+    }
+    return null;
+  }
+
+  /** Clicks a session row (scrolling the list if needed) and waits until the chat header shows it. Never uses search. */
   async openChat(name: string, frame?: Frame): Promise<Frame> {
     let f = frame ?? (await this.capture());
     if (sameChat(f.vision.title, name)) return f;
-    const row = f.vision.sessions.find((s) => sameChat(s.name, name));
-    if (!row) throw new Error(`会话「${name}」不在可见的会话列表中，已跳过`);
+    const found = await this.findSession(name, f);
+    if (!found) throw new Error(`会话列表中找不到「${name}」，已跳过（可在微信中先打开一次该会话）`);
+    f = found.f;
+    const row = found.row;
     await this.act('click', { x: Math.round(row.x), y: Math.round(row.y) });
     for (let i = 0; i < 5; i++) {
       await sleep(300);

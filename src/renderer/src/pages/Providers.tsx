@@ -81,12 +81,17 @@ export default function Providers() {
             <Form.Item noStyle shouldUpdate>{() => form.getFieldValue('type') === 'command' && (
               <Alert style={{ marginBottom: 12 }} type="info" message="自定义命令：系统提示词 + 聊天记录通过 stdin 传入，stdout 作为回复；参数中可用 {{chat}} {{system}} {{model}}。" />
             )}</Form.Item>
-            <Space style={{ display: 'flex' }} align="start">
-              <Form.Item name="model" label="模型（--model）"><Input style={{ width: 200 }} placeholder="默认" /></Form.Item>
-              <Form.Item name="timeoutMs" label="超时(ms)"><InputNumber min={5000} step={5000} /></Form.Item>
-              <Form.Item name="sessionPerChat" label="每个会话保持上下文" valuePropName="checked"><Switch /></Form.Item>
-              <Form.Item name="passMcpServers" label="传递 MCP 配置" valuePropName="checked"><Switch /></Form.Item>
-            </Space>
+            <Form.Item noStyle shouldUpdate={(x, y) => x.type !== y.type}>{() => {
+              const cli = form.getFieldValue('type') !== 'command';
+              return (
+                <Space style={{ display: 'flex' }} align="start">
+                  <Form.Item name="model" label={cli ? '模型（--model）' : '模型（参数中的 {{model}}）'}><Input style={{ width: 200 }} placeholder="默认" /></Form.Item>
+                  <Form.Item name="timeoutMs" label="超时(ms)"><InputNumber min={5000} step={5000} /></Form.Item>
+                  {cli && <Form.Item name="sessionPerChat" label="每个会话保持上下文" valuePropName="checked" tooltip="开启后用 --session-id / --resume 让每个微信会话在 harness 中有独立上下文"><Switch /></Form.Item>}
+                  {cli && <Form.Item name="passMcpServers" label="传递 MCP 配置" valuePropName="checked" tooltip="把智能体选中的 mcp:* 服务通过 --mcp-config 传给 harness"><Switch /></Form.Item>}
+                </Space>
+              );
+            }}</Form.Item>
             <Form.Item name="args" label="额外参数（每行一个）" tooltip="例如 --tools 与 Read,WebSearch 各占一行；--allowedTools；--agent xxx"><Input.TextArea rows={3} className="mono" /></Form.Item>
             <Form.Item name="cwd" label="工作目录" tooltip="默认 ~/.wechat-relay/harness/<id>"><Input /></Form.Item>
             <Form.Item name="env" label="环境变量（每行 KEY=value）"><Input.TextArea rows={2} className="mono" /></Form.Item>

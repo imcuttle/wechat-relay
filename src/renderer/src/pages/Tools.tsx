@@ -1,16 +1,42 @@
-import { useState } from 'react';
-import { App, Button, Form, Input, InputNumber, Modal, Space, Switch, Tag, Typography } from 'antd';
-import { Plug, Wrench } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Alert, App, Button, Form, Input, InputNumber, Modal, Space, Switch, Tag, Typography } from 'antd';
+import { Braces, Plug, Wrench } from 'lucide-react';
+import { fromMcpJson, toMcpJson } from '@shared/mcpJson';
 import type { McpServerConfig, ToolConfig } from '@shared/types';
 import CodeEditor from '../components/CodeEditor';
 import ConfigList, { kvToText, linesToList, listToLines, textToKv } from '../components/ConfigList';
 import { errMsg, useRelay } from '../relay';
+
+function McpJsonEditor({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const { config, saveConfig } = useRelay();
+  const [text, setText] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => { if (open && config) { setText(toMcpJson(config.mcpServers)); setError(null); } }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+  const check = (t: string) => { try { fromMcpJson(t); setError(null); } catch (e) { setError((e as Error).message); } };
+  const save = async () => {
+    let servers: McpServerConfig[];
+    try { servers = fromMcpJson(text); } catch (e) { setError((e as Error).message); return; }
+    await saveConfig((c) => { c.mcpServers = servers; });
+    onClose();
+  };
+  return (
+    <Modal open={open} title="以 JSON 编辑 MCP 服务" width={760} onCancel={onClose} onOk={() => void save()} okText="保存" okButtonProps={{ disabled: !!error }} destroyOnHidden>
+      <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+        与 Claude Code / Cursor / CodeBuddy 的 <code>mcpServers</code> 格式兼容，可直接粘贴。stdio 用 <code>command</code> + <code>args</code> + <code>env</code>，
+        HTTP / SSE 用 <code>url</code> + <code>headers</code>；<code>"disabled": true</code> 表示停用。保存会替换整个列表。
+      </Typography.Paragraph>
+      <CodeEditor language="json" height={420} value={text} onChange={(t) => { setText(t); check(t); }} onSave={() => void save()} />
+      {error && <Alert style={{ marginTop: 8 }} type="error" showIcon message={error} />}
+    </Modal>
+  );
+}
 
 export default function Tools() {
   const { saveConfig } = useRelay();
   const { message } = App.useApp();
   const [mcpTools, setMcpTools] = useState<{ id: string; tools: Array<{ name: string; description?: string }> } | null>(null);
   const [loading, setLoading] = useState<string | null>(null);
+  const [jsonOpen, setJsonOpen] = useState(false);
 
   const inspect = async (id: string) => {
     setLoading(id);
@@ -52,6 +78,7 @@ export default function Tools() {
       <ConfigList
         listKey="mcpServers"
         title="MCP 服务（在智能体中以 mcp:<id> 引用）"
+        extra={<Button size="small" icon={<Braces size={14} />} onClick={() => setJsonOpen(true)}>JSON 编辑</Button>}
         columns={[
           { title: '启用', dataIndex: 'enabled', width: 60, render: (v: boolean, r) => <Switch size="small" checked={v} onChange={(on) => void saveConfig((c) => { c.mcpServers.find((x) => x.id === r.id)!.enabled = on; })} /> },
           { title: 'ID', dataIndex: 'id', render: (v: string) => <Typography.Text strong>{v}</Typography.Text> },
@@ -81,6 +108,7 @@ export default function Tools() {
           </>
         )}
       />
+      <McpJsonEditor open={jsonOpen} onClose={() => setJsonOpen(false)} />
       <Modal open={!!mcpTools} title={`MCP ${mcpTools?.id} 提供的工具`} footer={null} onCancel={() => setMcpTools(null)} width={640}>
         {mcpTools?.tools.map((t) => (
           <div key={t.name} style={{ padding: '6px 0', borderBottom: '1px solid #f5f5f5' }}>
