@@ -109,8 +109,17 @@ function registerIpc(): void {
   });
 }
 
+// Last-resort guard: log instead of showing Electron's modal "JavaScript error in the main process" dialog.
+process.on('uncaughtException', (e) => log.error(`未捕获异常：${e.stack ?? e.message}`));
+process.on('unhandledRejection', (e) => log.error(`未处理的 Promise 拒绝：${errText(e)}`));
+
 app.whenReady().then(() => {
   loadShellPath();
+  // Packaged apps get the icon from Info.plist; in dev the Dock would show Electron's default.
+  if (!app.isPackaged && process.platform === 'darwin') {
+    const icon = nativeImage.createFromPath(join(app.getAppPath(), 'build', 'icon.png'));
+    if (!icon.isEmpty()) app.dock?.setIcon(icon);
+  }
   store.load();
   try { configStore.load(); } catch (e) { dialog.showErrorBox('配置文件错误', `${CONFIG_PATH}\n\n${errText(e)}`); }
   configStore.watch((e) => log.error(`配置重载失败：${errText(e)}`));

@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { existsSync, mkdirSync, readFileSync, watch, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, watchFile, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import YAML from 'yaml';
@@ -7,6 +7,8 @@ import type { AppConfig } from '@shared/types';
 
 export const DATA_DIR = process.env.WECHAT_RELAY_HOME || join(homedir(), '.wechat-relay');
 export const CONFIG_PATH = join(DATA_DIR, 'config.yaml');
+/** Screenshots are rewritten every poll; keep them out of the data dir. */
+export const CACHE_DIR = process.env.WECHAT_RELAY_HOME ? join(DATA_DIR, 'cache') : join(homedir(), 'Library', 'Caches', 'wechat-relay');
 
 const DEFAULT_YAML = `# WeChat Relay 配置（保存后自动热加载，也可在应用界面中编辑）
 # 字符串中的 \${ENV_NAME} 会在使用时替换为环境变量。
@@ -189,14 +191,14 @@ class ConfigStore extends EventEmitter {
     this.saveYaml(doc.toString({ lineWidth: 0 }));
   }
 
+  /**
+   * Polls the file's mtime instead of fs.watch: Finder-launched apps have a 256 file-descriptor soft limit and
+   * fs.watch (FSEvents) can fail with EMFILE at startup. Polling uses no descriptor and survives atomic saves.
+   */
   watch(onError: (e: Error) => void): void {
-    let timer: NodeJS.Timeout | undefined;
-    watch(DATA_DIR, (_e, file) => {
-      if (file !== 'config.yaml' || Date.now() - this.selfWrite < 1000) return;
-      clearTimeout(timer);
-      timer = setTimeout(() => {
-        try { this.load(); this.emit('change', this.config); } catch (e) { onError(e as Error); }
-      }, 300);
+    watchFile(CONFIG_PATH, { interval: 1000 }, (cur, prev) => {
+      if (cur.mtimeMs === prev.mtimeMs || Date.now() - this.selfWrite < 1500) return;
+      try { this.load(); this.emit('change', this.config); } catch (e) { onError(e as Error); }
     });
   }
 }

@@ -1,7 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { VisionResult } from '@shared/types';
-import { DATA_DIR } from './config';
+import { CACHE_DIR } from './config';
 import { CuaDriver, structured, text } from './driver';
 import { errText, logger, sleep } from './util';
 import { Vision } from './vision';
@@ -55,7 +55,7 @@ export function sameChat(a: string | null | undefined, b: string | null | undefi
  */
 export class WeChat {
   win: WindowRef | null = null;
-  private frameDir = join(DATA_DIR, 'frames');
+  private frameDir = join(CACHE_DIR, 'frames');
   private frameSeq = 0;
   constructor(private driver: CuaDriver, private vision: Vision) {
     mkdirSync(this.frameDir, { recursive: true });

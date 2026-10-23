@@ -11,13 +11,15 @@
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "build:mac": "npm run build && electron-builder --mac",
-    "install:mac": "bash scripts/install-mac.sh"
+    "install:mac": "bash scripts/install-mac.sh",
+    "icon": "swift scripts/make-icon.swift build/icon.png && bash scripts/make-icns.sh"
   },
   "build": {
     "appId": "dev.cuttleyu.wechat-relay",
     "productName": "WeChat Relay",
     "directories": {
-      "output": "dist"
+      "output": "dist",
+      "buildResources": "build"
     },
     "files": [
       "out/**/*",
@@ -27,6 +29,10 @@
       {
         "from": "native/bin",
         "to": "native"
+      },
+      {
+        "from": "build/icon.png",
+        "to": "icon.png"
       }
     ],
     "npmRebuild": false,
@@ -36,7 +42,8 @@
       ],
       "identity": null,
       "category": "public.app-category.productivity",
-      "notarize": false
+      "notarize": false,
+      "icon": "build/icon.icns"
     }
   },
   "dependencies": {
