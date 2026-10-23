@@ -1,15 +1,23 @@
 import { execFileSync } from 'node:child_process';
-import { basename, join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { app, BrowserWindow, dialog, ipcMain, nativeImage, net, Notification, protocol, shell } from 'electron';
-import type { AppConfig, Persona, PersonaOptions, RelayEvent, ReplyMode, TestAgentRequest, TestAgentResult, ToolConfig } from '@shared/types';
-import { runAgent } from './agent/engine';
+import type { AppConfig, ChatMessage, DebugSection, Persona, PromptCase, PersonaOptions, RelayEvent, ReplyMode, TestAgentRequest, TestAgentResult, ToolConfig } from '@shared/types';
+import { dream } from './agent/dream';
+import { runAgent, syncPrewarm } from './agent/engine';
+import { prewarm } from './agent/prewarm';
+import { memorySummaries, readMemory, writeMemory } from './agent/memory';
+import { proxy } from './agent/proxy';
+import { allSkills, deleteSkill, skillPath, syncSkills } from './agent/skills';
 import { prepareScriptTool } from './agent/scriptTools';
 import { mcpPool } from './agent/tools';
 import { CONFIG_PATH, configStore, MEDIA_DIR } from './config';
 import { Monitor } from './monitor';
 import { store } from './store';
 import { errText, logger } from './util';
+import { personaPromptId } from '@shared/prompt';
 import { visionBinary } from './vision';
 import type { Frame } from './wechat';
 
@@ -72,30 +80,67 @@ function handle<T extends unknown[], R>(channel: string, fn: (...args: T) => R |
   ipcMain.handle(channel, async (_e, ...args) => fn(...(args as T)));
 }
 
-const personaPromptId = (chat: string) => `persona-${chat.trim().replace(/\s+/g, '-')}`;
-
 function getPersona(chat: string): Persona | null {
   const meta = store.chat(chat)?.persona;
   if (!meta) return null;
-  return { ...meta, text: configStore.config.prompts.find((x) => x.id === meta.prompt)?.content ?? '' };
+  const own = personaPromptId(chat);
+  const p = configStore.config.prompts.find((x) => x.id === own);
+  return { ...meta, own, text: p?.content ?? '', goodCases: p?.goodCases ?? [], badCases: p?.badCases ?? [] };
 }
 
-/** A chat's persona is a normal entry of `prompts` in the config (shown on the 提示词 page); the chat links to it. */
+/**
+ * Persona in use = any prompt of the config. The chat's own persona prompt must have text; switching away keeps it
+ * (and its examples, which still apply on top of the other prompt).
+ */
+function selectPersona(chat: string, prompt: string | null): Persona | null {
+  const meta = store.chat(chat)?.persona;
+  if (prompt === null) {
+    if (meta) store.setPersona(chat, { ...meta, enabled: false });
+    return getPersona(chat);
+  }
+  const p = configStore.config.prompts.find((x) => x.id === prompt);
+  if (!p) throw new Error(`没有 id 为「${prompt}」的提示词`);
+  if (!p.content.trim()) throw new Error(prompt === personaPromptId(chat) ? '本会话人设还没有正文，先在「人设」里生成或填写' : `提示词「${p.name || p.id}」是空的`);
+  store.setPersona(chat, { ...(meta ?? {}), prompt, enabled: true, updatedAt: Date.now() });
+  return getPersona(chat);
+}
+
+/** Reply examples live on the chat's own persona prompt; a chat without one gets an empty, switched-off persona. */
+function setPersonaCases(chat: string, cases: { goodCases: PromptCase[]; badCases: PromptCase[] }): Persona {
+  const meta = store.chat(chat)?.persona;
+  const id = personaPromptId(chat);
+  const next = structuredClone(configStore.config);
+  const clean = (l: PromptCase[]) => { const x = (l ?? []).filter((c) => c.reply?.trim()); return x.length ? x : undefined; };
+  const fields = { goodCases: clean(cases.goodCases), badCases: clean(cases.badCases) };
+  const i = next.prompts.findIndex((x) => x.id === id);
+  if (i >= 0) next.prompts[i] = { ...next.prompts[i], ...fields }; else next.prompts.push({ id, name: `人设 · ${chat}`, content: '', ...fields });
+  configStore.save(next);
+  if (!meta) store.setPersona(chat, { prompt: id, enabled: false, updatedAt: Date.now() });
+  return getPersona(chat)!;
+}
+
+/**
+ * Writes the chat's own persona prompt (a normal entry of `prompts`, shown on the 提示词 page). Enabling it switches
+ * the chat to it; switching it off only matters while it is the one in use.
+ */
 function setPersona(chat: string, p: { text: string; enabled: boolean; source?: string }): Persona | null {
   const meta = store.chat(chat)?.persona;
-  const id = meta?.prompt ?? personaPromptId(chat);
+  const id = personaPromptId(chat);
+  const inUse = !meta || meta.prompt === id;
   const next = structuredClone(configStore.config);
   const i = next.prompts.findIndex((x) => x.id === id);
   if (!p.text.trim()) {
-    // Only remove prompts this feature created; a linked hand-made prompt stays.
-    if (i >= 0 && id.startsWith('persona-')) { next.prompts.splice(i, 1); configStore.save(next); }
-    store.setPersona(chat, null);
-    return null;
+    if (i >= 0) { next.prompts.splice(i, 1); configStore.save(next); }
+    // Another prompt switched to stays in use.
+    store.setPersona(chat, inUse ? null : { ...meta!, source: undefined });
+    return getPersona(chat);
   }
-  const prompt = { id, name: `人设 · ${chat}`, content: p.text.trim() };
-  if (i >= 0) next.prompts[i] = { ...next.prompts[i], content: prompt.content }; else next.prompts.push(prompt);
+  const content = p.text.trim();
+  if (i >= 0) next.prompts[i] = { ...next.prompts[i], content }; else next.prompts.push({ id, name: `人设 · ${chat}`, content });
   configStore.save(next);
-  store.setPersona(chat, { prompt: id, enabled: p.enabled, updatedAt: Date.now(), source: p.source ?? meta?.source });
+  store.setPersona(chat, p.enabled || inUse
+    ? { prompt: id, enabled: p.enabled, updatedAt: Date.now(), source: p.source ?? meta?.source }
+    : { ...meta!, updatedAt: Date.now(), source: p.source ?? meta?.source });
   return getPersona(chat);
 }
 
@@ -114,6 +159,7 @@ function registerIpc(): void {
   handle('getHistory', (chat: string) => store.history(chat));
   handle('setChatPaused', (chat: string, paused: boolean) => store.setPaused(chat, paused));
   handle('clearHistory', (chat: string) => store.clear(chat));
+  handle('deleteChats', (chats: string[]) => store.remove(chats));
   handle('getDrafts', () => store.drafts());
   handle('approveDraft', (id: string, text?: string) => monitor.approve(id, text));
   handle('rejectDraft', (id: string) => monitor.reject(id));
@@ -124,6 +170,12 @@ function registerIpc(): void {
   handle('setChatMode', (chat: string, mode: ReplyMode | 'inherit') => store.setMode(chat, mode));
   handle('getPersona', (chat: string) => getPersona(chat));
   handle('setPersona', (chat: string, p: { text: string; enabled: boolean }) => setPersona(chat, p));
+  handle('selectPersona', (chat: string, prompt: string | null) => selectPersona(chat, prompt));
+  handle('agentPrompt', (chat: string) => {
+    const agent = configStore.config.agents.find((a) => a.id === monitor.agentFor(chat).agent);
+    return agent ? { agent: agent.name || agent.id, prompt: agent.prompt } : null;
+  });
+  handle('setPersonaCases', (chat: string, c: { goodCases: PromptCase[]; badCases: PromptCase[] }) => setPersonaCases(chat, c));
   handle('generatePersona', async (chat: string, o: PersonaOptions) => {
     const r = await monitor.generatePersona(chat, o);
     return { persona: setPersona(chat, { text: r.text, enabled: true, source: r.source })!, count: r.count, note: r.note };
@@ -134,17 +186,52 @@ function registerIpc(): void {
     return (await mcpPool.tools({ ...s, enabled: true })).map((t) => ({ name: t.name, description: t.description }));
   });
   handle('prepareTool', (t: ToolConfig) => prepareScriptTool(t));
+  const chatNames = () => store.summaries().map((c) => c.name);
+  handle('listMemory', () => memorySummaries(chatNames()));
+  handle('readMemory', (scope: 'global' | 'session', chat?: string) => readMemory(scope, chat));
+  handle('writeMemory', (scope: 'global' | 'session', chat: string | undefined, text: string) => writeMemory(scope, chat, text));
+  handle('listSkills', () => allSkills(configStore.config, chatNames()));
+  handle('readSkill', (scope: 'global' | 'session', chat: string | undefined, id: string) => {
+    const file = skillPath(scope, chat, id);
+    return existsSync(file) ? readFileSync(file, 'utf8') : '';
+  });
+  handle('writeSkill', (scope: 'global' | 'session', chat: string | undefined, id: string, text: string) => {
+    const file = skillPath(scope, chat, id);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, text);
+  });
+  handle('deleteSkill', (scope: 'global' | 'session', chat: string | undefined, id: string) => deleteSkill(scope, chat, id));
+  handle('dreamMemory', async (chat?: string) => ({ message: await dream(configStore.config, chat) }));
   handle('testAgent', async (req: TestAgentRequest): Promise<TestAgentResult> => {
     const t0 = Date.now();
     const now = Date.now();
-    const history = req.messages.map((m, i) => ({ id: String(i), side: m.side, sender: m.sender, text: m.text, at: now, source: 'ocr' as const }));
-    const incoming: typeof history = [];
+    const detail: DebugSection[] = [];
+    const history: ChatMessage[] = [];
+    for (const [i, m] of req.messages.entries()) {
+      const msg: ChatMessage = { id: String(i), side: m.side, sender: m.sender, text: m.text, at: now, source: 'ocr' };
+      if (m.image) {
+        // Same shape as a real image message: a downscaled JPEG crop in MEDIA_DIR + "[图片] <text in it>".
+        const img = nativeImage.createFromDataURL(m.image);
+        if (img.isEmpty()) throw new Error(`第 ${i + 1} 条消息的图片无法解析`);
+        const max = configStore.config.general.imageMaxSize || 768;
+        const { width, height } = img.getSize();
+        const k = Math.min(1, max / Math.max(width, height));
+        const jpg = (k < 1 ? img.resize({ width: Math.round(width * k), height: Math.round(height * k), quality: 'best' }) : img).toJPEG(85);
+        mkdirSync(MEDIA_DIR, { recursive: true });
+        const file = join(MEDIA_DIR, `test-${createHash('sha1').update(jpg).digest('hex').slice(0, 16)}.jpg`);
+        writeFileSync(file, jpg);
+        const ocr = m.text.trim() || (await monitor.vision.ocr(file).catch(() => null))?.text.trim() || '';
+        Object.assign(msg, { kind: 'image', image: file, text: ocr ? `[图片] ${ocr}` : '[图片]' });
+      }
+      history.push(msg);
+    }
+    const incoming: ChatMessage[] = [];
     for (let i = history.length - 1; i >= 0 && history[i].side === 'other'; i--) incoming.unshift(history[i]);
     try {
-      const out = await runAgent(configStore.config, req.agent, { chat: req.chat, isGroup: req.isGroup, history, incoming });
-      return { ok: true, reply: out.reply, skipped: out.skipped, trace: [...out.trace, ...(out.reason ? [`skip: ${out.reason}`] : [])], ms: Date.now() - t0 };
+      const out = await runAgent(configStore.config, req.agent, { chat: req.chat, isGroup: req.isGroup, history, incoming, debug: detail });
+      return { ok: true, reply: out.reply, skipped: out.skipped, trace: [...out.trace, ...(out.reason ? [`skip: ${out.reason}`] : [])], detail, ms: Date.now() - t0 };
     } catch (e) {
-      return { ok: false, error: errText(e), trace: [], ms: Date.now() - t0 };
+      return { ok: false, error: errText(e), trace: [], detail, ms: Date.now() - t0 };
     }
   });
 }
@@ -170,6 +257,7 @@ app.whenReady().then(() => {
   store.load();
   try { configStore.load(); } catch (e) { dialog.showErrorBox('配置文件错误', `${CONFIG_PATH}\n\n${errText(e)}`); }
   configStore.watch((e) => log.error(`配置重载失败：${errText(e)}`));
+  syncSkills(configStore.config);
   // Exact chat names used in rules get a (possibly empty) record so they show up in 会话记录 right away.
   const syncRuleChats = (c: AppConfig) => {
     const names = c.rules.flatMap((r) => (r.enabled === false ? [] : r.match.chats ?? []))
@@ -182,12 +270,15 @@ app.whenReady().then(() => {
   syncRuleChats(configStore.config);
   configStore.on('change', (c: AppConfig) => {
     syncRuleChats(c);
+    syncSkills(c);
     monitor.setConfig(c);
     void mcpPool.closeAll();
+    syncPrewarm(c);
     send({ type: 'config', config: c });
     log.info('配置已更新');
   });
 
+  syncPrewarm(configStore.config);
   monitor = new Monitor(configStore.config, visionBinary(app.getAppPath(), app.isPackaged ? process.resourcesPath : undefined));
   monitor.on('status', (status) => send({ type: 'status', status }));
   monitor.on('frame', sendFrame);
@@ -210,4 +301,4 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => { /* keep monitoring in the background on macOS */ if (process.platform !== 'darwin') app.quit(); });
-app.on('before-quit', () => { store.flush(); void monitor?.dispose(); void mcpPool.closeAll(); });
+app.on('before-quit', () => { store.flush(); void monitor?.dispose(); void mcpPool.closeAll(); proxy.close(); prewarm.dispose(); });

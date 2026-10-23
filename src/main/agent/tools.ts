@@ -4,9 +4,9 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { builtinEnabled } from '@shared/builtins';
 import type { AgentConfig, AppConfig, ChatMessage, McpServerConfig, ToolConfig } from '@shared/types';
-import { expandEnv } from '../config';
+import { expandEnv, knowledgeDirs } from '../config';
 import { errText, logger } from '../util';
-import { BUILTINS, runProcess } from './builtins';
+import { BUILTINS, runProcess, scopedFileTools } from './builtins';
 import { prepareScriptTool, runScriptTool } from './scriptTools';
 
 const log = logger.scope('tools');
@@ -87,20 +87,28 @@ class McpPool {
 
 export const mcpPool = new McpPool();
 
+/** Built-ins a harness CLI already has natively (Read / Write / Edit / Glob / Grep / LS / Bash / WebFetch). */
+const NATIVE_IN_HARNESS = new Set(['builtin:read', 'builtin:write', 'builtin:edit', 'builtin:glob', 'builtin:grep', 'builtin:ls', 'builtin:bash', 'builtin:fetch']);
+
 /**
  * Resolves an agent's tool list: builtin:*, custom tool ids, mcp:<server id>.
  * A tool is used only when the agent selects it AND it is enabled globally.
+ * Model agents also get Read / Write / Edit / Glob / Grep limited to the memory / skill directories whenever either is
+ * on (selected or not). For `harness` the result is what the proxy MCP server serves: no external MCP servers (they are
+ * passed straight to the CLI) and no built-ins the CLI has itself.
  */
-export async function resolveTools(cfg: AppConfig, agent: AgentConfig): Promise<ToolImpl[]> {
+export async function resolveTools(cfg: AppConfig, agent: AgentConfig, opts: { harness?: boolean } = {}): Promise<ToolImpl[]> {
   const out: ToolImpl[] = [];
   for (const id of agent.tools ?? []) {
     try {
       if (id.startsWith('builtin:')) {
         if (!BUILTINS[id]) throw new Error('未定义');
+        if (opts.harness && NATIVE_IN_HARNESS.has(id)) continue;
         if (builtinEnabled(cfg.builtinTools, id)) out.push(BUILTINS[id]);
         continue;
       }
       if (id.startsWith('mcp:')) {
+        if (opts.harness) continue;
         const s = cfg.mcpServers.find((x) => x.id === id.slice(4));
         if (!s) throw new Error('未定义');
         if (!s.enabled) continue;
@@ -120,6 +128,10 @@ export async function resolveTools(cfg: AppConfig, agent: AgentConfig): Promise<
     } catch (e) {
       log.warn(`工具 ${id} 不可用：${errText(e)}`);
     }
+  }
+  const dirs = knowledgeDirs(cfg);
+  if (dirs.length && !opts.harness) {
+    for (const t of scopedFileTools(dirs)) if (!out.some((x) => x.name === t.name)) out.push(t);
   }
   return out;
 }

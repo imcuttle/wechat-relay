@@ -63,6 +63,9 @@ export const CONFIG_DOCS: Record<string, SectionDoc> = {
       timeoutMs: { type: '毫秒', def: '180000', desc: '超过这个时间还没返回就放弃本次回复。' },
       sessionPerChat: { type: 'true / false', desc: '每个微信会话使用独立的代理会话，让它记住上下文（仅 codebuddy / claude-code）。' },
       passMcpServers: { type: 'true / false', desc: '把智能体启用的 MCP 服务通过 --mcp-config 传给代理。' },
+      toolProxy: { type: 'true / false', def: 'true', desc: '在本机起一个代理 MCP 服务，把智能体的内置工具、自定义工具（命令 / TypeScript）以及记忆、skill 用的文件工具传给代理（仅 codebuddy / claude-code）。' },
+      disableNativeMemory: { type: 'true / false', def: 'true', desc: '关闭代理自带的 Auto Memory（设置 CODEBUDDY_DISABLE_AUTO_MEMORY / CLAUDE_CODE_DISABLE_AUTO_MEMORY），统一使用 ~/.wechat-relay/memory。' },
+      prewarm: { type: 'true / false', def: 'true', desc: '提前启动一个 codebuddy --prewarm 待命进程（完成冷启动、登录、MCP 发现），回复时再绑定 cwd 和参数，省去约 5 秒的启动时间（仅 codebuddy）。每个预热进程只用一次，用完自动补一个。' },
     },
   },
   builtinTools: {
@@ -96,6 +99,30 @@ export const CONFIG_DOCS: Record<string, SectionDoc> = {
       headers: { type: '键值', desc: '（HTTP / SSE 方式）请求头，例如鉴权信息。' },
     },
   },
+  memory: {
+    title: '记忆', desc: '跨消息的长期记忆。开启后系统提示词会附带全局记忆索引和读写路径说明，并自动给智能体开放只限 ~/.wechat-relay/memory 与 skills 目录的文件工具；记忆文件是普通 Markdown，一行一条。',
+    fields: {
+      enabled: { type: 'true / false', def: 'false', desc: '记忆总开关（与 Skill 互相独立）。' },
+      indexLimit: { type: '条数', def: '12', desc: '系统提示词里列出多少条全局记忆（按优先级、时间排序）。会话记忆不列出，需要时让智能体读文件或 grep。' },
+      dreamEveryMessages: { type: '条数', def: '100', desc: '某个会话新增这么多条消息后，自动「做梦」：让智能体整理合并该会话和全局记忆。', values: { '0': '只在界面手动触发' } },
+      dreamAgent: { type: '字符串', desc: '做梦使用的智能体 id，不填用第一个智能体。' },
+    },
+  },
+  skillsEnabled: {
+    title: 'Skill 总开关', desc: 'true / false，默认 false。与记忆互相独立：开启后系统提示词带 skill 索引与路径说明，并开放只限 ~/.wechat-relay/skills 的文件工具。', fields: {},
+  },
+  skills: {
+    title: 'Skill', desc: '可复用的操作指引（SKILL.md），文件在 ~/.wechat-relay/skills。此处只记录启用开关和初始内容；文件已存在时以磁盘为准。', list: true,
+    fields: {
+      id: { type: '字符串', desc: '唯一标识，也是目录名（字母数字下划线连字符）。' },
+      name: { type: '字符串', desc: '界面显示名称。' },
+      description: { type: '字符串', desc: '一句话说明何时使用，会列在系统提示词的 skill 索引里。' },
+      scope: { type: '字符串', def: 'global', desc: '生效范围。', values: { global: '所有会话', session: '只对 chat 指定的会话' } },
+      chat: { type: '字符串', desc: '（scope=session）会话名。' },
+      enabled: { type: 'true / false', def: 'true', desc: '是否列入提示词。' },
+      content: { type: '文本', desc: 'SKILL.md 正文；仅在文件不存在时写入。' },
+    },
+  },
   prompts: {
     title: '提示词', desc: '可复用的系统提示词。智能体用 prompt 字段引用 id。', list: true,
     fields: {
@@ -104,6 +131,8 @@ export const CONFIG_DOCS: Record<string, SectionDoc> = {
       content: {
         type: '模板文本', desc: '提示词正文，支持模板变量：{{myNickname}} 你的昵称、{{chat}} 会话名、{{sender}} 最新发言人、{{now}} 当前时间；{{#group}}…{{/group}} 只在群聊时生效。',
       },
+      goodCases: { type: '列表', desc: '好的回复示例，追加在正文后让模型参照。每项：context 之前的对话（每行「说话人: 内容」）、reply 我的回复、note 好在哪里（可选）。可在「会话记录」里勾选消息标注。' },
+      badCases: { type: '列表', desc: '不好的回复示例，追加在正文后让模型避免。字段同 goodCases，note 写问题所在。' },
     },
   },
   agents: {

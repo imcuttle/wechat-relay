@@ -29,9 +29,11 @@ export default function YamlPage() {
   const jump = (path: string[], key: string) => {
     const line = findField(textRef.current.split('\n'), path, key);
     if (line < 0 || !editor.current) { message.info('当前配置里没有这个字段，可以在编辑器里输入字段名（会有补全提示）'); return; }
-    editor.current.revealLineInCenter(line + 1);
-    editor.current.setPosition({ lineNumber: line + 1, column: 1 });
-    editor.current.focus();
+    try {
+      editor.current.revealLineInCenter(line + 1);
+      editor.current.setPosition({ lineNumber: line + 1, column: 1 });
+      editor.current.focus();
+    } catch { editor.current = null; /* editor was disposed */ }
   };
 
   const q = query.trim().toLowerCase();

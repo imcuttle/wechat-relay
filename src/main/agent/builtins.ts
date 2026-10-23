@@ -1,8 +1,8 @@
 import { spawn } from 'node:child_process';
 import { mkdir, readdir, readFile, stat, writeFile, appendFile, glob } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { WORKSPACE_DIR } from '../config';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { DATA_DIR, WORKSPACE_DIR } from '../config';
 import { nowText } from '../util';
 import type { ToolImpl } from './tools';
 
@@ -49,6 +49,15 @@ function htmlToText(html: string): string {
 const obj = (properties: Record<string, unknown>, required: string[] = []) => ({ type: 'object', properties, required });
 const PATH_HINT = '相对路径基于工作目录 ~/.wechat-relay/workspace，可用绝对路径或 ~/';
 
+/** Writes to the same file run one after another (several chats may edit the same memory file concurrently). */
+const chains = new Map<string, Promise<unknown>>();
+function serial<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const next = (chains.get(key) ?? Promise.resolve()).catch(() => undefined).then(fn);
+  chains.set(key, next);
+  void next.finally(() => { if (chains.get(key) === next) chains.delete(key); }).catch(() => undefined);
+  return next;
+}
+
 export const BUILTINS: Record<string, ToolImpl> = {
   'builtin:time': {
     name: 'get_current_time', description: '获取当前日期、星期和时间', parameters: obj({}),
@@ -66,7 +75,7 @@ export const BUILTINS: Record<string, ToolImpl> = {
     run: async (args, ctx) => { ctx.skipped = { reason: String(args.reason ?? '') }; return 'ok, no reply will be sent'; },
   },
   'builtin:fetch': {
-    name: 'fetch_url', description: '发起 HTTP 请求（获取网页正文或调用 API），HTML 会转成纯文本',
+    name: 'WebFetch', description: '发起 HTTP 请求（获取网页正文或调用 API），HTML 会转成纯文本',
     parameters: obj({
       url: { type: 'string' },
       method: { type: 'string', description: '默认 GET' },
@@ -89,7 +98,7 @@ export const BUILTINS: Record<string, ToolImpl> = {
     },
   },
   'builtin:read': {
-    name: 'read_file', description: `读取文本文件，返回带行号的内容。${PATH_HINT}`,
+    name: 'Read', description: `读取文本文件，返回带行号的内容。${PATH_HINT}`,
     parameters: obj({
       path: { type: 'string' },
       offset: { type: 'integer', description: '起始行（从 1 开始）' },
@@ -107,7 +116,7 @@ export const BUILTINS: Record<string, ToolImpl> = {
     },
   },
   'builtin:ls': {
-    name: 'list_dir', description: `列出目录内容（目录以 / 结尾）。${PATH_HINT}`,
+    name: 'LS', description: `列出目录内容（目录以 / 结尾）。${PATH_HINT}`,
     parameters: obj({ path: { type: 'string', description: '默认工作目录' } }),
     run: async (args) => {
       const p = resolvePath(args.path, await workspace());
@@ -121,7 +130,7 @@ export const BUILTINS: Record<string, ToolImpl> = {
     },
   },
   'builtin:glob': {
-    name: 'glob_files', description: `按通配符查找文件，如 **/*.md。${PATH_HINT}`,
+    name: 'Glob', description: `按通配符查找文件，如 **/*.md。${PATH_HINT}`,
     parameters: obj({ pattern: { type: 'string' }, cwd: { type: 'string', description: '搜索根目录，默认工作目录' } }, ['pattern']),
     run: async (args) => {
       const cwd = resolvePath(args.cwd, await workspace());
@@ -134,7 +143,7 @@ export const BUILTINS: Record<string, ToolImpl> = {
     },
   },
   'builtin:grep': {
-    name: 'grep_files', description: `在文件中搜索正则（扩展正则），返回 文件:行号:内容。${PATH_HINT}`,
+    name: 'Grep', description: `在文件中搜索正则（扩展正则），返回 文件:行号:内容。${PATH_HINT}`,
     parameters: obj({
       pattern: { type: 'string' },
       path: { type: 'string', description: '文件或目录，默认工作目录' },
@@ -152,35 +161,50 @@ export const BUILTINS: Record<string, ToolImpl> = {
     },
   },
   'builtin:write': {
-    name: 'write_file', description: `写入文本文件（自动创建目录），默认覆盖。${PATH_HINT}`,
+    name: 'Write', description: `写入文本文件（自动创建目录），默认覆盖。${PATH_HINT}`,
     parameters: obj({ path: { type: 'string' }, content: { type: 'string' }, append: { type: 'boolean', description: '追加到末尾而不是覆盖' } }, ['path', 'content']),
     run: async (args) => {
       const p = resolvePath(args.path, await workspace());
       const content = String(args.content ?? '');
       await mkdir(dirname(p), { recursive: true });
-      await (args.append ? appendFile(p, content) : writeFile(p, content));
+      await serial(p, () => (args.append ? appendFile(p, content) : writeFile(p, content)));
       return `已${args.append ? '追加' : '写入'} ${Buffer.byteLength(content)} 字节到 ${p}`;
     },
   },
   'builtin:edit': {
-    name: 'edit_file', description: `把文件中的 old_string 替换为 new_string（old_string 须唯一，除非 replace_all）。${PATH_HINT}`,
+    name: 'Edit', description: `编辑文本文件，两种方式：1) old_string → new_string 替换（old_string 须唯一，除非 replace_all）；2) 给出 start_line（及 end_line，含，默认等于 start_line），用 new_string 替换这些行，end_line = start_line - 1 表示在 start_line 之前插入，new_string 为空表示删除这些行。${PATH_HINT}`,
     parameters: obj({
       path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' }, replace_all: { type: 'boolean' },
-    }, ['path', 'old_string', 'new_string']),
+      start_line: { type: 'integer', description: '按行编辑：起始行（从 1 开始）' },
+      end_line: { type: 'integer', description: '按行编辑：结束行（含）' },
+    }, ['path']),
     run: async (args) => {
       const p = resolvePath(args.path, await workspace());
-      const text = await readFile(p, 'utf8');
-      const from = String(args.old_string ?? ''), to = String(args.new_string ?? '');
-      if (!from) return 'error: old_string 不能为空';
-      const count = text.split(from).length - 1;
-      if (!count) return 'error: 未找到 old_string';
-      if (count > 1 && !args.replace_all) return `error: old_string 出现了 ${count} 次，请提供更多上下文或设置 replace_all`;
-      await writeFile(p, args.replace_all ? text.split(from).join(to) : text.replace(from, () => to));
-      return `已替换 ${args.replace_all ? count : 1} 处：${p}`;
+      return serial(p, async () => {
+        const text = await readFile(p, 'utf8');
+        const to = String(args.new_string ?? '');
+        if (args.start_line != null) {
+          const lines = text.split('\n');
+          const start = Math.floor(Number(args.start_line));
+          const end = args.end_line == null ? start : Math.floor(Number(args.end_line));
+          if (!(start >= 1 && start <= lines.length + 1)) return `error: start_line 需在 1 ~ ${lines.length + 1} 之间（文件共 ${lines.length} 行）`;
+          if (end < start - 1 || end > lines.length) return `error: end_line 需在 ${start - 1} ~ ${lines.length} 之间`;
+          lines.splice(start - 1, end - start + 1, ...(to === '' && end >= start ? [] : to.split('\n')));
+          await writeFile(p, lines.join('\n'));
+          return `已按行编辑 ${p}：第 ${start}-${Math.max(end, start - 1)} 行 → ${to === '' ? '删除' : `${to.split('\n').length} 行`}`;
+        }
+        const from = String(args.old_string ?? '');
+        if (!from) return 'error: 需要 old_string，或 start_line（按行编辑）';
+        const count = text.split(from).length - 1;
+        if (!count) return 'error: 未找到 old_string';
+        if (count > 1 && !args.replace_all) return `error: old_string 出现了 ${count} 次，请提供更多上下文或设置 replace_all`;
+        await writeFile(p, args.replace_all ? text.split(from).join(to) : text.replace(from, () => to));
+        return `已替换 ${args.replace_all ? count : 1} 处：${p}`;
+      });
     },
   },
   'builtin:bash': {
-    name: 'run_shell', description: '在 bash 中执行命令，返回 stdout / stderr / 退出码。默认工作目录 ~/.wechat-relay/workspace',
+    name: 'Bash', description: '在 bash 中执行命令，返回 stdout / stderr / 退出码。默认工作目录 ~/.wechat-relay/workspace',
     parameters: obj({
       command: { type: 'string' },
       cwd: { type: 'string' },
@@ -195,3 +219,41 @@ export const BUILTINS: Record<string, ToolImpl> = {
     },
   },
 };
+
+/** Memory / skill files only: the paths the silently enabled file tools may touch. */
+const inside = (dirs: string[], p: string) => dirs.some((d) => p === d || p.startsWith(d + sep));
+
+/**
+ * read / glob / grep / write / edit limited to the given directories (memory and / or skills). They are added to an agent whenever
+ * memory or skills are on, whether or not the unrestricted builtins are enabled: relative paths are based on the data
+ * dir (`memory/global.md`), anything outside the two directories is refused.
+ */
+export function scopedFileTools(dirs: string[]): ToolImpl[] {
+  const SCOPE_HINT = `只能访问 ${dirs.map((d) => `~/.wechat-relay/${relative(DATA_DIR, d)}`).join('、')}，相对路径基于 ~/.wechat-relay`;
+  const list: Array<[string, string]> = [['builtin:read', 'path'], ['builtin:glob', 'cwd'], ['builtin:grep', 'path'], ['builtin:write', 'path'], ['builtin:edit', 'path']];
+  return list.map(([id, key]) => {
+    const t = BUILTINS[id];
+    return {
+      ...t,
+      description: t.description.replace(PATH_HINT, SCOPE_HINT),
+      run: async (args, ctx) => {
+        const raw = String(args[key] ?? '').trim();
+        if (!raw && (key === 'path' && (id === 'builtin:read' || id === 'builtin:write' || id === 'builtin:edit'))) return 'error: 需要 path';
+        const p = resolvePath(raw || dirs[0], DATA_DIR);
+        if (!inside(dirs, p)) return `error: 只能访问 ${dirs.join('、')}`;
+        // Overwriting an existing memory / skill file loses its other lines (and the format header): append or edit instead.
+        if (id === 'builtin:write' && !args.append && await stat(p).then(() => true, () => false)) {
+          return 'error: 文件已存在，Write 会覆盖掉原有内容。追加新内容请设 append=true；修改已有内容请先 Read，再用 Edit（可用 start_line / end_line 按行修改）';
+        }
+        if (id === 'builtin:glob' && /(^|[\\/])\.\.([\\/]|$)/.test(String(args.pattern ?? ''))) return 'error: 通配符不能包含 ..';
+        // Appended entries are lines: keep them apart from the previous last line.
+        if (id === 'builtin:write' && args.append) {
+          const prev = await readFile(p, 'utf8').catch(() => '');
+          const body = String(args.content ?? '');
+          return t.run({ ...args, [key]: p, content: (prev && !prev.endsWith('\n') ? '\n' : '') + body + (body.endsWith('\n') ? '' : '\n') }, ctx);
+        }
+        return t.run({ ...args, [key]: p }, ctx);
+      },
+    };
+  });
+}

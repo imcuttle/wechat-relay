@@ -1,10 +1,17 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AgentConfig, AppConfig, ChatMessage, HarnessConfig, ProviderConfig } from '@shared/types';
-import { DATA_DIR, expandEnv } from '../config';
+import type { AgentConfig, AppConfig, ChatMessage, DebugSection, HarnessConfig, ProviderConfig } from '@shared/types';
+import { promptText } from '@shared/prompt';
+import { DATA_DIR, expandEnv, knowledgeDirs, MEDIA_DIR, MEMORY_DIR } from '../config';
 import { dateText, errText, nowText, render, sleep } from '../util';
+import { scopedFileTools } from './builtins';
+import { memoryGuide } from './memory';
+import { skillGuide } from './skills';
+import { prewarm, PREWARM_ARGS, type ExecResult, type PrewarmSpec } from './prewarm';
+import { proxy } from './proxy';
 import { resolveTools, type ToolCtx, type ToolImpl } from './tools';
 
 export interface AgentInput {
@@ -18,6 +25,8 @@ export interface AgentInput {
   incoming: ChatMessage[];
   /** Persona prompt of this chat (a full prompt template); replaces the agent's base prompt. */
   persona?: string;
+  /** When set, the full request / response of the run is appended here (debug panel). */
+  debug?: DebugSection[];
 }
 
 export interface AgentOutput { reply: string | null; skipped: boolean; reason?: string; trace: string[] }
@@ -42,8 +51,13 @@ function systemPrompt(cfg: AppConfig, agent: AgentConfig, input: AgentInput): st
     myNickname: cfg.general.myNickname || '我',
     now: dateText(),
   };
-  const base = input.persona?.trim() || (agent.prompt ? cfg.prompts.find((p) => p.id === agent.prompt)?.content ?? '' : '');
-  return render([base, agent.systemPrompt ?? ''].filter((s) => s.trim()).join('\n\n'), vars).trim();
+  const base = input.persona?.trim() || (agent.prompt ? promptText(cfg.prompts.find((p) => p.id === agent.prompt)) : '');
+  const prompt = render([base, agent.systemPrompt ?? ''].filter((s) => s.trim()).join('\n\n'), vars).trim();
+  // Same text for model and harness agents (Read / Write / Edit / Glob / Grep are native in a harness, scoped tools for a model).
+  // Appended after rendering: memory lines may contain "{{".
+  // A custom-command harness has no file tools: no memory guidance for it.
+  const noTools = agent.engine === 'harness' && cfg.harnesses.find((x) => x.id === agent.harness)?.type === 'command';
+  return [prompt, input.chat && !noTools ? memoryGuide(cfg, input.chat) : '', input.chat && !noTools ? skillGuide(cfg, input.chat) : ''].filter(Boolean).join('\n\n');
 }
 
 const timeNote = () => `[当前时间：${nowText()}]`;
@@ -150,6 +164,21 @@ function anthropicTurns(ts: Turn[]): any[] {
       }));
 }
 
+/** Turns as readable debug sections; images are listed by path. */
+function turnSections(ts: Turn[]): DebugSection[] {
+  let n = 0;
+  return ts.map((t, i) => {
+    const images = t.parts.flatMap((p) => (p.type === 'image' ? [p.path] : []));
+    const text = t.parts.map((p) => (p.type === 'text' ? p.text : `<图片 ${++n}: ${p.path}>`)).join('\n');
+    return { title: `消息 ${i + 1} · ${t.role}`, text, ...(images.length ? { images } : {}) };
+  });
+}
+
+const pretty = (v: unknown) => { try { return JSON.stringify(typeof v === 'string' ? JSON.parse(v) : v, null, 2); } catch { return String(v); } };
+
+/** Image files referenced in a harness prompt ("（图片文件：path）"). */
+const promptImages = (s: string) => [...s.matchAll(/（图片文件：([^）]+)）/g)].map((m) => m[1]);
+
 const countImages = (ts: Turn[]) => ts.reduce((n, t) => n + t.parts.filter((p) => p.type === 'image').length, 0);
 
 /** Text of a message for transcripts; harnesses with vision get the image path to open themselves. */
@@ -245,19 +274,22 @@ async function runTool(tools: ToolImpl[], call: ToolCall, ctx: ToolCtx, trace: s
 
 const usageText = (u: Usage) => `in ${u.input}${u.cacheRead ? `（缓存命中 ${u.cacheRead}）` : ''}${u.cacheWrite ? `（写入缓存 ${u.cacheWrite}）` : ''} / out ${u.output}`;
 
-async function agentLoop(ad: Adapter, maxRounds: number, tools: ToolImpl[], ctx: ToolCtx, trace: string[]): Promise<string | null> {
+async function agentLoop(ad: Adapter, maxRounds: number, tools: ToolImpl[], ctx: ToolCtx, trace: string[], debug?: DebugSection[]): Promise<string | null> {
   const total: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   for (let round = 0; ; round++) {
     const final = round >= maxRounds;
     const r = await ad.step(final);
     for (const k of Object.keys(total) as Array<keyof Usage>) total[k] += r.usage[k];
     trace.push(`round ${round + 1}${final && round ? '（最后一轮）' : ''}: ${usageText(r.usage)}`);
+    debug?.push({ title: `第 ${round + 1} 轮 · 模型输出`, text: [r.text || '(无文本)', ...r.calls.map((c) => `→ 调用 ${c.name}\n${pretty(c.args)}`)].join('\n\n') });
     if (!r.calls.length) {
       if (round) trace.push(`total: ${usageText(total)}`);
       return r.text;
     }
     // Calls of one turn are independent by contract: run them concurrently, keep their order in the reply.
-    ad.addResults(await Promise.all(r.calls.map((c) => runTool(tools, c, ctx, trace))));
+    const results = await Promise.all(r.calls.map((c) => runTool(tools, c, ctx, trace)));
+    for (const x of results) debug?.push({ title: `工具结果 · ${x.call.name}${x.isError ? '（错误）' : ''}`, text: x.content });
+    ad.addResults(results);
     if (ctx.skipped) return null;
   }
 }
@@ -364,55 +396,147 @@ function cleanEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   return env;
 }
 
+/**
+ * Runs a CLI; its stdout goes to a temp file, not a pipe: a CLI that calls process.exit() loses whatever is still
+ * buffered for a pipe (codebuddy -p --output-format json was cut off at 128 KB once a resumed session grew).
+ */
 function exec(cmd: string, args: string[], opts: { cwd: string; env: NodeJS.ProcessEnv; input?: string; timeoutMs: number }): Promise<{ code: number | null; out: string; err: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { cwd: opts.cwd, env: opts.env, timeout: opts.timeoutMs });
-    let out = '', err = '';
-    child.stdout.on('data', (d) => { out += d; });
-    child.stderr.on('data', (d) => { err += d; });
-    child.on('error', reject);
-    child.on('close', (code) => resolve({ code, out, err }));
-    child.stdin.end(opts.input ?? '');
+    const file = join(tmpdir(), `wechat-relay-${randomUUID()}.out`);
+    const fd = openSync(file, 'w');
+    const drop = () => rmSync(file, { force: true });
+    let child;
+    try { child = spawn(cmd, args, { cwd: opts.cwd, env: opts.env, timeout: opts.timeoutMs, stdio: ['pipe', fd, 'pipe'] }); }
+    catch (e) { drop(); throw e; }
+    finally { closeSync(fd); }
+    let err = '';
+    child.stderr!.setEncoding('utf8').on('data', (d: string) => { err += d; });
+    child.on('error', (e) => { drop(); reject(e); });
+    child.on('close', (code) => {
+      let out = '';
+      try { out = readFileSync(file, 'utf8'); } catch { /* nothing written */ }
+      drop();
+      resolve({ code, out, err });
+    });
+    child.stdin!.end(opts.input ?? '');
   });
 }
 
-function parseCliResult(out: string): { text: string; sessionId?: string; error?: string } {
-  const pick = (r: any) => (r && r.type === 'result' ? { text: String(r.result ?? ''), sessionId: r.session_id, error: r.is_error ? String(r.result ?? 'error') : undefined } : null);
-  try {
-    const j = JSON.parse(out);
-    const found = Array.isArray(j) ? [...j].reverse().map(pick).find(Boolean) : pick(j);
-    if (found) return found;
-  } catch { /* stream / plain text */ }
-  for (const line of out.trim().split('\n').reverse()) { try { const r = pick(JSON.parse(line)); if (r) return r; } catch { /* skip */ } }
-  return { text: out.trim() };
+/**
+ * Runs the CLI in a prewarmed standby process when one is ready (binding cwd + arguments only now).
+ * undefined: no usable standby, the caller cold-starts. The outcome is recorded in the trace and the debug panel.
+ */
+async function execPrewarmed(spec: PrewarmSpec, args: string[], timeoutMs: number, trace: string[], debug?: DebugSection[]): Promise<ExecResult | undefined> {
+  const t0 = Date.now();
+  const note = (text: string) => { trace.push(`预热：${text}`); debug?.push({ title: '预热', text }); };
+  const taken = await prewarm.take(spec);
+  if (!taken.standby) { note(`${taken.info}，改为冷启动`); return undefined; }
+  const run = await prewarm.run(taken.standby, spec.cwd, args.slice(PREWARM_ARGS.length), timeoutMs);
+  if (!run.result) { note(`${taken.info}，但激活失败（${run.error}），改为冷启动`); return undefined; }
+  note(`${taken.info}；激活 ${run.activateMs}ms（cwd ${spec.cwd}），从取用到结束共 ${Date.now() - t0}ms`);
+  return run.result;
 }
 
-async function runHarness(cfg: AppConfig, h: HarnessConfig, agent: AgentConfig, system: string, input: AgentInput, limit: number, trace: string[], raw?: string): Promise<string> {
+/** Text of an assistant message in the CLI's JSON output (codebuddy: output_text parts; claude: text blocks). */
+function assistantText(m: any): string | null {
+  if (m?.type !== 'message' && m?.type !== 'assistant') return null;
+  const msg = m.type === 'assistant' ? m.message : m;
+  if (msg?.role !== 'assistant') return null;
+  const c = msg.content;
+  return typeof c === 'string' ? c : Array.isArray(c) ? c.map((b: any) => (b?.type === 'output_text' || b?.type === 'text' ? b.text ?? '' : '')).join('') : null;
+}
+
+/**
+ * Reply from `-p --output-format json` output: the result entry, else the last assistant message. Output that is
+ * structured but has neither (e.g. truncated) is an error: it must never end up as the reply.
+ */
+function parseCliResult(out: string): { text: string; sessionId?: string; error?: string } {
+  const pick = (r: any) => (r && r.type === 'result' ? { text: String(r.result ?? ''), sessionId: r.session_id, error: r.is_error ? String(r.result ?? 'error') : undefined } : null);
+  const fromItems = (items: any[]) => {
+    const found = [...items].reverse().map(pick).find(Boolean);
+    if (found) return found;
+    const last = [...items].reverse().map(assistantText).find((t) => t != null);
+    return last != null ? { text: last } : null;
+  };
+  const raw = out.trim();
+  try {
+    const j = JSON.parse(raw);
+    const r = fromItems(Array.isArray(j) ? j : [j]);
+    if (r) return r;
+  } catch { /* stream-json / plain text / truncated */ }
+  const lines: any[] = [];
+  for (const line of raw.split('\n')) { try { lines.push(JSON.parse(line)); } catch { /* not a JSON line */ } }
+  const r = lines.length ? fromItems(lines) : null;
+  if (r) return r;
+  if (/^[[{]/.test(raw)) return { text: '', error: `无法解析 harness 的 JSON 输出（${raw.length} 字节，可能被截断）：…${raw.slice(-160)}` };
+  return { text: raw };
+}
+
+/** Working directory and environment a harness CLI runs with (shared by cold starts and the prewarmed standby). */
+function harnessRuntime(cfg: AppConfig, h: HarnessConfig): { cwd: string; env: NodeJS.ProcessEnv } {
   const cwd = h.cwd ? expandEnv(h.cwd) : join(DATA_DIR, 'harness', h.id);
   mkdirSync(cwd, { recursive: true });
   const env = cleanEnv(h.env);
+  // Our memory replaces the CLI's own auto-memory.
+  if (cfg.memory.enabled && h.disableNativeMemory && h.type !== 'command') {
+    env.CODEBUDDY_DISABLE_AUTO_MEMORY = '1';
+    env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '1';
+  }
+  return { cwd, env };
+}
+
+/** Only CodeBuddy has `--prewarm`. */
+const prewarmable = (h: HarnessConfig) => h.type === 'codebuddy' && h.prewarm !== false;
+
+/** Keep one prewarmed `codebuddy` standby per eligible harness (call at startup and whenever the config changes). */
+export function syncPrewarm(cfg: AppConfig): void {
+  const specs: PrewarmSpec[] = cfg.harnesses.filter(prewarmable).map((h) => ({ id: h.id, command: h.command, ...harnessRuntime(cfg, h) }));
+  prewarm.sync(specs);
+}
+
+async function runHarness(cfg: AppConfig, h: HarnessConfig, agent: AgentConfig, system: string, input: AgentInput, limit: number, trace: string[], raw?: string, ctx?: ToolCtx): Promise<string> {
+  const { cwd, env } = harnessRuntime(cfg, h);
   const prompt = raw ?? transcript(input, agent, limit);
 
+  const debug = input.debug;
   if (h.type === 'command') {
     const args = h.args.map((a) => render(a, { chat: input.chat, system, model: h.model ?? '' }));
     trace.push(`$ ${h.command} ${args.join(' ')}`);
+    debug?.push({ title: '命令', text: `cd ${cwd}\n${h.command} ${args.join(' ')}` });
+    debug?.push({ title: 'stdin', text: `${system}\n\n${prompt}`, images: promptImages(prompt) });
     const r = await exec(h.command, args, { cwd, env, input: `${system}\n\n${prompt}`, timeoutMs: h.timeoutMs });
+    debug?.push({ title: `输出（exit ${r.code}）`, text: [r.out, r.err && `stderr:\n${r.err}`].filter(Boolean).join('\n\n') || '(空)' });
     if (r.code !== 0) throw new Error(`harness exit ${r.code}: ${short(r.err || r.out, 400)}`);
     return r.out.trim();
   }
 
   // codebuddy / claude-code: same headless interface.
-  const args = ['-p', '--output-format', 'json', '--append-system-prompt', system];
+  const args = [...PREWARM_ARGS, '--append-system-prompt', system];
   if (h.model) args.push('--model', h.model);
+  // Image crops and the memory / skill files live outside the harness cwd: let its Read / Write / Edit tools reach them.
+  const dirs = [...(agent.vision ? [MEDIA_DIR] : []), ...knowledgeDirs(cfg)];
+  for (const d of dirs) mkdirSync(d, { recursive: true }); // the CLI refuses --add-dir paths that do not exist
+  if (dirs.length) args.push('--add-dir', ...dirs);
+  const mcpServers: Record<string, unknown> = {};
   if (h.passMcpServers) {
-    const servers = cfg.mcpServers.filter((s) => s.enabled && agent.tools.includes(`mcp:${s.id}`));
-    if (servers.length) {
-      const mcpServers = Object.fromEntries(servers.map((s) => [s.id, s.url
+    for (const s of cfg.mcpServers.filter((x) => x.enabled && agent.tools.includes(`mcp:${x.id}`))) {
+      mcpServers[s.id] = s.url
         ? { type: 'http', url: expandEnv(s.url), headers: s.headers }
-        : { command: s.command, args: s.args ?? [], env: s.env ?? {} }]));
-      args.push('--mcp-config', JSON.stringify({ mcpServers }));
+        : { command: s.command, args: s.args ?? [], env: s.env ?? {} };
     }
   }
+  // Built-in / custom tools of the agent (what the CLI does not have itself) go through the local proxy MCP server.
+  let release = () => {};
+  if (h.toolProxy && ctx && raw === undefined) {
+    const tools = await resolveTools(cfg, agent, { harness: true });
+    if (tools.length) {
+      const reg = await proxy.register({ tools, ctx, trace });
+      release = reg.release;
+      mcpServers.wr = { type: 'http', url: reg.url, headers: { Authorization: `Bearer ${reg.token}` } };
+      trace.push(`proxy tools: ${tools.map((t) => t.name).join(', ')}`);
+    }
+  }
+  if (Object.keys(mcpServers).length) args.push('--mcp-config', JSON.stringify({ mcpServers }));
   const key = `${h.id}:${input.chat}`;
   let session = h.sessionPerChat && raw === undefined ? harnessSessions.get(key) : undefined;
   if (h.sessionPerChat && raw === undefined) {
@@ -427,8 +551,18 @@ async function runHarness(cfg: AppConfig, h: HarnessConfig, agent: AgentConfig, 
     ? `${timeNote()}\n新消息：\n${input.incoming.map((m) => `${speaker(m, input.chat, input.isGroup)}: ${lineText(m, agent)}`).join('\n')}\n\n请直接输出回复正文；不需要回复则只输出 [SKIP]。`
     : prompt;
   args.push(body);
-  trace.push(`$ ${h.command} ${args.slice(0, -1).map((a) => (a.length > 60 ? `'${a.slice(0, 57)}…'` : a)).join(' ')} <prompt>`);
-  const r = await exec(h.command, args, { cwd, env, timeoutMs: h.timeoutMs });
+  trace.push(`$ ${prewarmable(h) ? '(预热) ' : ''}${h.command} ${args.slice(0, -1).map((a) => (a.length > 60 ? `'${a.slice(0, 57)}…'` : a)).join(' ')} <prompt>`);
+  if (debug) {
+    const q = (a: string) => (/^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`);
+    debug.push({ title: '命令', text: `cd ${q(cwd)}\n${h.command} ${args.slice(0, -1).map(q).join(' ')} <prompt>` });
+    debug.push({ title: session?.started ? `prompt（续接会话 ${session.id}）` : 'prompt', text: body, images: promptImages(body) });
+  }
+  let r: ExecResult | undefined;
+  try {
+    if (prewarmable(h)) r = await execPrewarmed({ id: h.id, command: h.command, cwd, env }, args, h.timeoutMs, trace, debug);
+    r ??= await exec(h.command, args, { cwd, env, timeoutMs: h.timeoutMs });
+  } finally { release(); }
+  debug?.push({ title: `输出（exit ${r.code}）`, text: [pretty(r.out.trim()), r.err && `stderr:\n${r.err}`].filter(Boolean).join('\n\n') || '(空)' });
   const parsed = parseCliResult(r.out);
   if (r.code !== 0 || parsed.error) {
     if (session) harnessSessions.delete(key);
@@ -445,11 +579,12 @@ export async function runAgent(cfg: AppConfig, agentId: string, input: AgentInpu
   const system = systemPrompt(cfg, agent, input);
   const ctx: ToolCtx = { chat: input.chat, isGroup: input.isGroup, history: input.allHistory ?? input.history, skipped: null };
   const limit = cfg.general.historyLimit;
+  input.debug?.push({ title: '系统提示词', text: system || '(空)' });
 
   if (agent.engine === 'harness') {
     const h = cfg.harnesses.find((x) => x.id === agent.harness);
     if (!h) throw new Error(`未找到 harness「${agent.harness}」`);
-    return finish(await runHarness(cfg, h, agent, system, input, limit, trace), ctx, trace);
+    return finish(await runHarness(cfg, h, agent, system, input, limit, trace, undefined, ctx), ctx, trace);
   }
 
   const p = cfg.providers.find((x) => x.id === agent.provider);
@@ -461,8 +596,12 @@ export async function runAgent(cfg: AppConfig, agentId: string, input: AgentInpu
   const run = (a: AgentConfig) => {
     const ts = turns(input, a, limit);
     if (countImages(ts)) trace.push(`images: ${countImages(ts)}`);
+    if (input.debug) {
+      input.debug.push({ title: '请求', text: `${p.type === 'anthropic' ? 'Anthropic' : 'OpenAI 兼容'} · ${a.model}${a.vision ? ' · 图片' : ''}${tools.length ? `\n工具：${tools.map((t) => t.name).join(', ')}` : ''}` });
+      input.debug.push(...turnSections(ts));
+    }
     const ad = p.type === 'anthropic' ? anthropicAdapter(p, a, system, ts, tools) : openaiAdapter(p, a, system, ts, tools, input.chat);
-    return agentLoop(ad, tools.length ? a.maxToolRounds : 0, tools, ctx, trace);
+    return agentLoop(ad, tools.length ? a.maxToolRounds : 0, tools, ctx, trace, input.debug);
   };
   let text: string | null;
   try {
@@ -497,5 +636,30 @@ export async function completeText(cfg: AppConfig, agentId: string, system: stri
   const ts: Turn[] = [{ role: 'user', parts: [{ type: 'text', text: user }] }];
   const ad = p.type === 'anthropic' ? anthropicAdapter(p, agent, system, ts, []) : openaiAdapter(p, agent, system, ts, [], 'persona');
   const text = await agentLoop(ad, 0, [], { chat: '', isGroup: false, history: [], skipped: null }, trace);
+  return (text ?? '').replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+}
+
+/**
+ * A one-off agent task with the memory / skill file tools (the dream): a model agent gets the scoped Read / Write / Edit /
+ * Glob / Grep, a harness uses its native ones. Returns the agent's final text.
+ */
+export async function runTask(cfg: AppConfig, agentId: string, system: string, user: string, maxRounds = 12): Promise<string> {
+  const base = cfg.agents.find((a) => a.id === agentId);
+  if (!base) throw new Error(`未找到 agent「${agentId}」`);
+  const agent: AgentConfig = { ...base, vision: false, temperature: 0.3, maxTokens: Math.max(4000, base.maxTokens ?? 0) };
+  const trace: string[] = [];
+  const input: AgentInput = { chat: '', isGroup: false, history: [], incoming: [] };
+  if (agent.engine === 'harness') {
+    const h = cfg.harnesses.find((x) => x.id === agent.harness);
+    if (!h) throw new Error(`未找到 harness「${agent.harness}」`);
+    return (await runHarness(cfg, h, agent, system, input, 0, trace, user)).replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+  }
+  const p = cfg.providers.find((x) => x.id === agent.provider);
+  if (!p) throw new Error(`未找到模型服务「${agent.provider}」`);
+  if (!agent.model) throw new Error(`agent「${agent.id}」未设置 model`);
+  const tools = scopedFileTools([MEMORY_DIR]);
+  const ts: Turn[] = [{ role: 'user', parts: [{ type: 'text', text: user }] }];
+  const ad = p.type === 'anthropic' ? anthropicAdapter(p, agent, system, ts, tools) : openaiAdapter(p, agent, system, ts, tools, 'dream');
+  const text = await agentLoop(ad, maxRounds, tools, { chat: '', isGroup: false, history: [], skipped: null }, trace);
   return (text ?? '').replace(/<think>[\s\S]*?<\/think>/g, '').trim();
 }

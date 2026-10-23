@@ -1,8 +1,8 @@
 import { useState } from 'react';
-import { App, Button, Card, Col, Form, Input, InputNumber, Row, Select, Space, Switch, Tag, Typography } from 'antd';
-import { Bot, Play, Plus, Trash } from 'lucide-react';
+import { App, Button, Card, Col, Form, Image, Input, InputNumber, Row, Select, Space, Switch, Tag, Typography, Upload } from 'antd';
+import { Bot, ImagePlus, Play, Plus, Trash, X } from 'lucide-react';
 import { BUILTIN_TOOLS, builtinEnabled } from '@shared/builtins';
-import type { AgentConfig, TestAgentResult } from '@shared/types';
+import type { AgentConfig, DebugSection, TestAgentResult } from '@shared/types';
 import CodeEditor from '../components/CodeEditor';
 import ConfigList from '../components/ConfigList';
 import { errMsg, useRelay } from '../relay';
@@ -33,9 +33,7 @@ export default function Agents() {
         modalWidth={760}
         fromForm={(v, prev) => {
           const a = { ...(prev ?? {}), ...v } as AgentConfig;
-          const tools = (a.tools ?? []) as string[];
-          // A harness only receives MCP servers; built-in / command tools would be silently ignored.
-          return { ...a, tools: a.engine === 'harness' ? tools.filter((t) => t.startsWith('mcp:')) : tools };
+          return a;
         }}
         form={(form) => (
           <>
@@ -73,15 +71,15 @@ export default function Agents() {
             </Form.Item>
             <Form.Item noStyle shouldUpdate={(a, b) => a.engine !== b.engine || a.harness !== b.harness}>{() => {
               if (form.getFieldValue('engine') !== 'harness') {
-                return <Form.Item name="tools" label="工具" extra="标注「未启用」的需先在「工具 / MCP」页打开开关才会生效"><Select mode="multiple" options={toolOptions} /></Form.Item>;
+                return <Form.Item name="tools" label="工具" extra="标注「未启用」的需先在「工具 / MCP」页打开开关才会生效。开启「记忆」或「Skill」后，Read / Write / Edit / Glob / Grep（限对应目录）会自动提供，无需勾选"><Select mode="multiple" options={toolOptions} /></Form.Item>;
               }
               const h = config.harnesses.find((x) => x.id === form.getFieldValue('harness'));
-              const mcpUsable = h && h.type !== 'command' && h.passMcpServers;
+              const cli = h && h.type !== 'command';
               return (
-                <Form.Item name="tools" label="MCP 服务（传给 harness）"
-                  extra={mcpUsable ? '内置工具与自定义命令工具由 harness 自身管理，这里只能选 MCP 服务，通过 --mcp-config 传入'
-                    : h ? `该 harness ${h.type === 'command' ? '是自定义命令，不支持' : '未开启「传递 MCP 配置」，不会使用'} MCP 服务` : '请先选择 harness'}>
-                  <Select mode="multiple" disabled={!mcpUsable} options={toolOptions.filter((g) => g.label === 'MCP 服务')} />
+                <Form.Item name="tools" label="工具（传给 harness）"
+                  extra={cli ? `MCP 服务${h.passMcpServers ? '' : '（该 harness 未开启「传递 MCP 配置」，不会使用）'}直接传入；时间 / 聊天记录 / 不回复和自定义工具${h.toolProxy ? '经本地代理 MCP 传入' : '（该 harness 未开启「代理内置 / 自定义工具」，不会使用）'}；文件 / Shell / 网页类工具 harness 自带，勾选无效`
+                    : h ? '自定义命令不支持工具' : '请先选择 harness'}>
+                  <Select mode="multiple" disabled={!cli} options={toolOptions.map((g) => (g.label === '内置' ? { ...g, options: g.options.filter((o) => ['builtin:time', 'builtin:history', 'builtin:skip'].includes(o.value)) } : g))} />
                 </Form.Item>
               );
             }}</Form.Item>
@@ -93,7 +91,30 @@ export default function Agents() {
   );
 }
 
-interface TestMsg { side: 'self' | 'other'; sender?: string; text: string }
+interface TestMsg { side: 'self' | 'other'; sender?: string; text: string; image?: string }
+
+const readDataUrl = (f: Blob) => new Promise<string>((resolve, reject) => {
+  const r = new FileReader();
+  r.onload = () => resolve(String(r.result));
+  r.onerror = () => reject(r.error);
+  r.readAsDataURL(f);
+});
+
+const mediaUrl = (path: string) => `relay-media://img/${encodeURIComponent(path.split('/').pop() ?? '')}`;
+
+function Section({ s }: { s: DebugSection }) {
+  return (
+    <div style={{ marginTop: 10 }}>
+      <Typography.Text strong style={{ fontSize: 12 }}>{s.title}</Typography.Text>
+      <pre className="mono debug-block">{s.text}</pre>
+      {!!s.images?.length && (
+        <Image.PreviewGroup>
+          <Space wrap size={6}>{s.images.map((p) => <Image key={p} src={mediaUrl(p)} height={90} style={{ borderRadius: 4 }} />)}</Space>
+        </Image.PreviewGroup>
+      )}
+    </div>
+  );
+}
 
 function TestPanel() {
   const { config } = useRelay();
@@ -104,6 +125,13 @@ function TestPanel() {
   const [msgs, setMsgs] = useState<TestMsg[]>([{ side: 'other', text: '在吗？周末有空一起吃饭不' }]);
   const [result, setResult] = useState<TestAgentResult | null>(null);
   const [busy, setBusy] = useState(false);
+
+  const patch = (i: number, p: Partial<TestMsg>) => setMsgs((ms) => ms.map((x, j) => (j === i ? { ...x, ...p } : x)));
+  const setImage = async (i: number, f: Blob) => patch(i, { image: await readDataUrl(f) });
+  const onPaste = (i: number) => (e: React.ClipboardEvent) => {
+    const f = [...e.clipboardData.items].find((it) => it.type.startsWith('image/'))?.getAsFile();
+    if (f) { e.preventDefault(); void setImage(i, f); }
+  };
 
   const run = async () => {
     if (!agent) return;
@@ -121,12 +149,25 @@ function TestPanel() {
             <Space size={4}>群聊<Switch size="small" checked={isGroup} onChange={setIsGroup} /></Space>
           </Space>
           {msgs.map((m, i) => (
-            <Space.Compact key={i} style={{ width: '100%', marginBottom: 6 }}>
-              <Select style={{ width: 90 }} value={m.side} onChange={(side) => setMsgs(msgs.map((x, j) => (j === i ? { ...x, side } : x)))} options={[{ value: 'other', label: '对方' }, { value: 'self', label: '我' }]} />
-              {isGroup && m.side === 'other' && <Input style={{ width: 110 }} placeholder="发送者" value={m.sender} onChange={(e) => setMsgs(msgs.map((x, j) => (j === i ? { ...x, sender: e.target.value } : x)))} />}
-              <Input value={m.text} onChange={(e) => setMsgs(msgs.map((x, j) => (j === i ? { ...x, text: e.target.value } : x)))} />
-              <Button icon={<Trash size={14} />} onClick={() => setMsgs(msgs.filter((_, j) => j !== i))} />
-            </Space.Compact>
+            <div key={i} style={{ marginBottom: 6 }}>
+              <Space.Compact style={{ width: '100%' }}>
+                <Select style={{ width: 90 }} value={m.side} onChange={(side) => patch(i, { side })} options={[{ value: 'other', label: '对方' }, { value: 'self', label: '我' }]} />
+                {isGroup && m.side === 'other' && <Input style={{ width: 110 }} placeholder="发送者" value={m.sender} onChange={(e) => patch(i, { sender: e.target.value })} />}
+                <Input value={m.text} onChange={(e) => patch(i, { text: e.target.value })} onPaste={onPaste(i)}
+                  placeholder={m.image ? '图中文字（留空则自动 OCR）' : '消息内容，可直接粘贴图片'} />
+                <Upload accept="image/*" showUploadList={false} beforeUpload={(f) => { void setImage(i, f); return false; }}>
+                  <Button icon={<ImagePlus size={14} />} title="作为图片消息" />
+                </Upload>
+                <Button icon={<Trash size={14} />} onClick={() => setMsgs(msgs.filter((_, j) => j !== i))} />
+              </Space.Compact>
+              {m.image && (
+                <div style={{ position: 'relative', display: 'inline-block', marginTop: 4, marginLeft: 90 }}>
+                  <Image src={m.image} height={72} style={{ borderRadius: 4 }} />
+                  <Button size="small" type="text" icon={<X size={12} />} onClick={() => patch(i, { image: undefined })}
+                    style={{ position: 'absolute', top: 0, right: 0, background: 'rgba(255,255,255,.85)' }} />
+                </div>
+              )}
+            </div>
           ))}
           <Space>
             <Button size="small" icon={<Plus size={14} />} onClick={() => setMsgs([...msgs, { side: 'other', text: '' }])}>添加消息</Button>
@@ -141,6 +182,7 @@ function TestPanel() {
                 ? result.skipped ? <div><Tag>不回复</Tag></div> : <div className="bubble bot" style={{ margin: '6px 0' }}>{result.reply}</div>
                 : <Typography.Paragraph type="danger" className="mono">{result.error}</Typography.Paragraph>}
               {result.trace.map((t, i) => <div key={i} className="mono log-line">{t}</div>)}
+              {result.detail?.map((s, i) => <Section key={i} s={s} />)}
             </>
           )}
         </Col>

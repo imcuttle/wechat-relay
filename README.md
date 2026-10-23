@@ -15,6 +15,15 @@
 - **起草**：「智能体」= 引擎 + 提示词 + 工具。引擎可以是任何 OpenAI 兼容接口或 Anthropic 接口的模型，也可以是 Harness（CodeBuddy CLI、Claude Code，或任何从 stdin 读提示、往 stdout 打回复的命令）。工具支持内置工具、自定义命令 / TypeScript 工具和 MCP 服务。
 - **你来定**：默认「审核后发送」，回复先进「待审核」，确认后才发；也可以对单条规则或单个会话设成「自动发送」。还有频率限制、随机延迟、冷却时间和会话风格档案。
 
+## 记忆与 Skill
+
+「记忆」页和「Skill」页各有一个独立开关。开启后，系统提示词分别附带全局记忆索引 / skill 索引，并说明文件路径规则；记忆和 skill 都是 `~/.wechat-relay/` 下的普通文件，智能体用 `Read` / `Glob` / `Grep` / `Write` / `Edit` 读写，没有专门的记忆工具：
+
+- 全局记忆 `memory/global.md`，会话记忆 `memory/sessions/<会话名-哈希>.md`（只有全局记忆进提示词索引，会话记忆让智能体自己读文件或 grep）；每行一条 `- [P0|2026-10-20 12:30] 内容`。
+- Skill：`skills/global/<id>/SKILL.md`、`skills/sessions/<会话名-哈希>/<id>/SKILL.md`。
+- 模型型智能体会自动获得只限已开启目录的 `Read` / `Glob` / `Grep` / `Write` / `Edit`（无视「内置工具」开关）；Harness 用自己的同名工具，并通过本机代理 MCP 获得勾选的时间 / 聊天记录 / 不回复和自定义工具，同时关闭 CLI 自带的 Auto Memory。
+- 「做梦」：记忆页手动触发，或每个会话新增 N 条消息后自动让智能体整理合并记忆（整理前原文件备份为 `*.bak`）。
+
 ## 环境要求
 
 - macOS，电脑版微信 4.x，微信主窗口保持打开（可以在后台，不要最小化）

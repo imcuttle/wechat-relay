@@ -157,10 +157,20 @@ func isTimeLike(_ s: String) -> Bool {
 
 /// WeChat UI overlays that are not messages: "3条新消息" pill, "以下为新消息" divider, jump-to-bottom hints.
 func isNoise(_ s: String) -> Bool {
-    let t = s.filter { !$0.isWhitespace && !"↓⬇⬆↑>〉›".contains($0) }
+    // OCR reads the pill's arrow icon as a stray symbol ("^3条新消息"): keep only letters, digits, CJK and @.
+    let t = s.filter { $0.isLetter || $0.isNumber || $0 == "@" }
     return t.range(of: #"^(有)?\d+条(新|未读)?消息$"#, options: .regularExpression) != nil
         || ["以下为新消息", "以下是新消息", "回到最新", "回到底部", "查看最新消息"].contains(t)
         || t.range(of: #"^\d+条@?我?的?消息$"#, options: .regularExpression) != nil
+}
+
+/// Joins OCR lines top to bottom; lines sharing a row are joined left to right with a space.
+func joinLines(_ ls: [Line]) -> String {
+    var rows: [[Line]] = []
+    for l in ls.sorted(by: { $0.midY < $1.midY }) {
+        if let last = rows.last?.last, abs(last.midY - l.midY) < min(last.h, l.h) * 0.5 { rows[rows.count - 1].append(l) } else { rows.append([l]) }
+    }
+    return rows.map { $0.sorted { $0.x < $1.x }.map { $0.text }.joined(separator: " ") }.joined(separator: "\n")
 }
 
 func analyze(path: String, scaleHint: Double?) -> Result {
@@ -170,201 +180,209 @@ func analyze(path: String, scaleHint: Double?) -> Result {
     }
     let W = bmp.w, H = bmp.h
     let s = scaleHint ?? 2.0              // screenshot pixels per point
-    func pt(_ v: Double) -> Int { Int(v * s) }
+    func pt(_ v: Double) -> Int { Int((v * s).rounded()) }
 
-    // --- Column background profile → sidebar / list / chat split.
-    let ys = stride(from: Int(Double(H) * 0.12), to: Int(Double(H) * 0.97), by: max(2, H / 300)).map { $0 }
-    var colBg: [RGB?] = []
-    for x in 0..<W {
-        let (c, share) = bmp.mode(ys.map { (x, $0) })
-        colBg.append(share > 0.55 ? c : nil)
+    // --- Columns. The sidebar | list | chat splits are vertical colour edges present on (almost) every row, whatever
+    // the theme, the selected row or the chat content (bubbles only cover some rows).
+    let edgeYs = Array(stride(from: Int(Double(H) * 0.1), to: Int(Double(H) * 0.95), by: 2))
+    var edgeCache: [Int: Double] = [:]
+    func edgeShare(_ x: Int) -> Double {
+        if let v = edgeCache[x] { return v }
+        var n = 0
+        for y in edgeYs where bmp.px(x - 2, y).dist(bmp.px(x + 2, y)) >= 5 { n += 1 }
+        let v = Double(n) / Double(max(1, edgeYs.count))
+        edgeCache[x] = v
+        return v
     }
-    // Stable runs of the same background colour.
-    struct Run { var a: Int; var b: Int; var c: RGB }
-    var runs: [Run] = []
-    for x in 0..<W {
-        guard let c = colBg[x] else { continue }
-        if var last = runs.last, last.c.dist(c) <= 6, x - last.b <= pt(40) { last.b = x; runs[runs.count - 1] = last }
-        else { runs.append(Run(a: x, b: x, c: c)) }
+    /// Centre of the strongest edge plateau in [a, b] (nil if no column has an edge on most rows).
+    func strongestEdge(_ a: Int, _ b: Int) -> Int? {
+        guard b > a else { return nil }
+        var bx = a, bv = 0.0
+        for x in a...b { let v = edgeShare(x); if v > bv + 0.001 { bx = x; bv = v } }
+        guard bv >= 0.7 else { return nil }
+        var hi = bx
+        while hi + 1 <= b && edgeShare(hi + 1) >= bv - 0.03 { hi += 1 }
+        return (bx + hi) / 2 + 1
     }
-    runs = runs.filter { $0.b - $0.a >= pt(12) }
-    // Merge runs with similar colour separated only by unstable columns (avatars).
-    var merged: [Run] = []
-    for r in runs { if var l = merged.last, l.c.dist(r.c) <= 6 { l.b = r.b; merged[merged.count - 1] = l } else { merged.append(r) } }
+    let sidebarRight = strongestEdge(pt(30), min(W / 3, pt(110))) ?? pt(60)
+    let listRight = strongestEdge(sidebarRight + pt(150), Int(Double(W) * 0.7)) ?? Int(Double(W) * 0.35)
+    let listLeft = sidebarRight, chatLeft = listRight
 
-    var sidebarRight = pt(60), listRight = Int(Double(W) * 0.35)
-    if merged.count >= 3 {
-        // Expected: [sidebar][list][chat]; chat is the run touching the right edge.
-        let chatRun = merged.last!
-        if let listIdx = merged.lastIndex(where: { $0.b < chatRun.a }) {
-            listRight = chatRun.a
-            let listRun = merged[listIdx]
-            sidebarRight = listIdx > 0 ? merged[listIdx - 1].b + 1 : listRun.a
-            // The list run starts where its colour begins.
-            sidebarRight = max(sidebarRight, merged[0].b + 1)
-        }
-    } else if merged.count == 2 {
-        listRight = merged[1].a; sidebarRight = pt(60)
-    }
-    let listLeft = sidebarRight, chatLeft = listRight, chatRight = W - 1
-    let chatBg = merged.last?.c ?? bmp.px(chatLeft + pt(10), H / 2)
+    // Chat background: the most common colour of the chat column.
+    var bgPts: [(Int, Int)] = []
+    for y in stride(from: pt(60), to: H - pt(8), by: pt(5)) { for x in stride(from: chatLeft + pt(4), to: W - pt(12), by: pt(5)) { bgPts.append((x, y)) } }
+    let chatBg = bmp.mode(bgPts).0
     let dark = chatBg.lum < 100
+    // Right edge of the chat column (window border / shadow excluded).
+    var chatRight = W - 1
+    while chatRight > W - pt(30) {
+        let same = edgeYs.filter { bmp.px(chatRight, $0).dist(chatBg) <= 3 }.count
+        if Double(same) >= Double(edgeYs.count) * 0.5 { break }
+        chatRight -= 1
+    }
+    let chatW = Double(chatRight - chatLeft), chatMid = Double(chatLeft + chatRight) / 2
 
     let lines = (try? ocr(bmp)) ?? []
     let chatLines = lines.filter { $0.x >= Double(chatLeft) - 2 }
     let listLines = lines.filter { $0.x >= Double(listLeft) - 2 && $0.maxX <= Double(listRight) + 4 }
 
-    // --- Chat header / title.
-    let headerLimit = Double(pt(56))
-    let titleLine = chatLines.filter { $0.y < headerLimit && $0.x < Double(chatLeft) + Double(chatRight - chatLeft) * 0.6 }.min(by: { $0.x < $1.x })
-    var headerBottom = titleLine.map { Int($0.maxY) + pt(14) } ?? pt(48)
-    // Prefer the real separator line under the header.
+    // --- Header: a full-width separator line under the title.
+    var headerBottom = pt(52)
     do {
-        let xs = [chatLeft + pt(30), chatLeft + (chatRight - chatLeft) / 2, chatRight - pt(60)]
-        for y in headerBottom - pt(10)..<min(H, headerBottom + pt(16)) {
-            let diff = xs.filter { bmp.px($0, y).dist(chatBg) > 6 }.count
-            if diff == xs.count { headerBottom = y + 1; break }
+        let xs = Array(stride(from: chatLeft + pt(20), to: chatRight - pt(20), by: 4))
+        for y in pt(30)..<min(H / 3, pt(90)) {
+            let diff = xs.filter { bmp.px($0, y).dist(chatBg) >= 4 }.count
+            if Double(diff) >= Double(xs.count) * 0.9 {
+                var e = y
+                while e < y + pt(3) && Double(xs.filter { bmp.px($0, e + 1).dist(chatBg) >= 4 }.count) >= Double(xs.count) * 0.9 { e += 1 }
+                headerBottom = e + 1
+                break
+            }
         }
     }
+    let titleLine = chatLines.filter { $0.maxY <= Double(headerBottom) + 2 && $0.x < Double(chatLeft) + chatW * 0.6 }.min(by: { $0.x < $1.x })
+    var title = titleLine?.text
+    var isGroup = false
+    if let t = title, let r = t.range(of: #"\s*[（(]\d+[)）]\s*$"#, options: .regularExpression) {
+        isGroup = true; title = String(t[..<r.lowerBound]).trimmingCharacters(in: .whitespaces)
+    }
 
-    // --- Input box: anchored on the 发送/Send button.
+    // --- Input box: a bordered box (light and dark) above the 发送/Send button.
     let sendLine = chatLines.filter { ["发送", "Send", "發送"].contains($0.text.trimmingCharacters(in: .whitespaces)) && $0.y > Double(H) * 0.5 }.max(by: { $0.y < $1.y })
     var inputTop = Int(Double(H) * 0.75)
-    if let sl = sendLine {
-        // The top of the input box is a border / separator spanning almost the whole chat width. Look for the first
-        // such row above the send button; typed text never covers a row that densely, so it can't be mistaken for it.
-        let x0 = chatLeft + pt(30), x1 = chatRight - pt(30)
-        let xs = Array(stride(from: x0, to: x1, by: 3))
-        let y0 = Int(sl.y) - pt(70)
-        let (bg, _) = bmp.mode(xs.map { ($0, y0) })
-        var found: Int? = nil
-        var y = y0
+    do {
+        let xs = Array(stride(from: chatLeft + pt(30), to: chatRight - pt(30), by: 3))
+        var y = sendLine.map { Int($0.y) - pt(70) } ?? H - pt(80)
         while y > Int(Double(H) * 0.4) {
-            let diff = xs.filter { bmp.px($0, y).dist(bg) > 6 }.count
-            if Double(diff) >= Double(xs.count) * 0.9 { found = y; break }
+            let diff = xs.filter { bmp.px($0, y).dist(chatBg) >= 4 }.count
+            if Double(diff) >= Double(xs.count) * 0.9 { inputTop = y; break }
             y -= 1
         }
-        if let f = found {
-            inputTop = f
-        } else {
-            let probeXs = [Int(sl.x) - pt(120), chatLeft + pt(40), chatLeft + (chatRight - chatLeft) / 2]
-            var tops: [Int] = []
-            for px in probeXs where px > chatLeft {
-                let ref = bmp.px(px, y0)
-                var y = y0
-                while y > Int(Double(H) * 0.4) {
-                    if bmp.px(px, y).dist(ref) > 6 && bmp.px(px, y - 1).dist(ref) > 6 { break }
-                    y -= 1
-                }
-                tops.append(y)
-            }
-            tops.sort()
-            if !tops.isEmpty { inputTop = tops[0] }
-        }
-        if inputTop <= Int(Double(H) * 0.4) + 1 { inputTop = Int(sl.y) - pt(110) }
+        if y <= Int(Double(H) * 0.4), let sl = sendLine { inputTop = Int(sl.y) - pt(110) }
     }
     let inputPoint = Point(x: Double(chatLeft + (chatRight - chatLeft) / 2), y: Double(inputTop + pt(40)))
     let sendPoint = sendLine.map { Point(x: $0.midX, y: $0.midY) }
 
-    // --- Avatars in the message area (they start every message).
-    let areaTop = headerBottom + 2, areaBottom = inputTop - 2
+    let areaTop = headerBottom, areaBottom = inputTop - pt(1)
+    func fg(_ x: Int, _ y: Int, _ t: Int = 4) -> Bool { bmp.px(x, y).dist(chatBg) > t }
+
+    // --- Avatars (36pt squares ~20pt from either chat edge) start every message.
     struct Avatar { var side: String; var top: Int; var bottom: Int }
-    func avatars(_ xs: [Int], side: String) -> [Avatar] {
+    func avatars(_ x0: Int, _ x1: Int, side: String) -> [Avatar] {
         var out: [Avatar] = []
-        var start: Int? = nil
-        let minLen = pt(26)
-        for y in areaTop..<max(areaTop, areaBottom) {
-            let hit = xs.contains { bmp.px($0, y).dist(chatBg) > 10 }
-            if hit { if start == nil { start = y } }
-            else if let st = start { if y - st >= minLen && y - st <= pt(48) { out.append(Avatar(side: side, top: st, bottom: y)) }; start = nil }
+        var st: Int? = nil, last = 0
+        func close() {
+            guard let a = st else { return }
+            let len = last - a + 1
+            let edge = a <= areaTop + 1 || last >= areaBottom - 2
+            if len <= pt(46) && (len >= pt(28) || (edge && len >= pt(4))) { out.append(Avatar(side: side, top: a, bottom: last + 1)) }
+            st = nil
         }
-        if let st = start, areaBottom - st >= minLen { out.append(Avatar(side: side, top: st, bottom: areaBottom)) }
+        for y in areaTop..<max(areaTop, areaBottom) {
+            var n = 0, x = x0
+            while x <= x1 { if fg(x, y) { n += 1 }; x += 2 }
+            if n >= 3 { if st == nil { st = y }; last = y }
+            else if st != nil && y - last > pt(4) { close() }
+        }
+        close()
         return out
     }
-    // Avatar is 36pt with ~20pt margin from the chat edge.
-    let otherXs = [chatLeft + pt(28), chatLeft + pt(38), chatLeft + pt(48)]
-    let selfXs = [chatRight - pt(30), chatRight - pt(40), chatRight - pt(50)]
-    var avs = avatars(otherXs, side: "other") + avatars(selfXs, side: "self")
-    avs.sort { $0.top < $1.top }
+    let avL = avatars(chatLeft + pt(18), chatLeft + pt(58), side: "other")
+    let avR = avatars(chatRight - pt(58), chatRight - pt(18), side: "self")
 
-    // --- Message lines.
-    let msgLines = chatLines.filter { $0.midY > Double(areaTop) && $0.midY < Double(areaBottom) && $0.x > Double(chatLeft + pt(8)) }
-    let chatMid = Double(chatLeft + chatRight) / 2, chatW = Double(chatRight - chatLeft)
-    func bubbleColor(_ l: Line) -> RGB? {
-        // Ring just outside the glyph box: inside a bubble it has the bubble colour, otherwise the chat background.
-        let pad = Double(pt(4))
-        var pts: [(Int, Int)] = []
-        for i in 0..<12 {
-            let fx = l.x + l.w * Double(i) / 11
-            pts.append((Int(fx), Int(l.y - pad))); pts.append((Int(fx), Int(l.maxY + pad)))
-        }
-        pts.append((Int(l.x - pad), Int(l.midY))); pts.append((Int(l.maxX + pad), Int(l.midY)))
-        let (c, share) = bmp.mode(pts)
-        if share < 0.4 || c.dist(chatBg) <= 8 { return nil }
-        return c
-    }
-
-    var messages: [Message] = []
-    var used = Set<Int>()
-    var title = titleLine?.text
-    var isGroup = false
-    if let t = title, let r = t.range(of: #"[（(]\d+[)）]\s*$"#, options: .regularExpression) {
-        isGroup = true; title = String(t[..<r.lowerBound]).trimmingCharacters(in: .whitespaces)
-    }
-
-    /// Bounds of the bubble / image next to an avatar: rows with non-background pixels between the avatar columns,
-    /// from `y0` until a background gap. Also returns each row's horizontal extent and whether it ran into `y1`.
-    func contentBox(from y0: Int, to y1: Int) -> (x: Int, y: Int, w: Int, h: Int, rows: [Int: (Int, Int)], cut: Bool)? {
-        let xa = chatLeft + pt(64), xb = chatRight - pt(64)
-        guard xb > xa, y1 > y0 else { return nil }
-        var top: Int? = nil, bottom = 0, gap = 0, minX = Int.max, maxX = Int.min, cut = true
-        var rows: [Int: (Int, Int)] = [:]
-        var y = max(0, y0)
-        while y < min(y1, H) {
-            var lo = Int.max, hi = Int.min
-            var x = xa
-            while x <= xb { if bmp.px(x, y).dist(chatBg) > 12 { if lo == Int.max { lo = x }; hi = x }; x += 3 }
-            if hi >= lo {
-                if top == nil { top = y }
-                bottom = y; gap = 0; minX = min(minX, lo); maxX = max(maxX, hi); rows[y] = (lo, hi)
-            } else if top != nil {
-                gap += 1
-                if gap >= pt(6) { cut = false; break }
+    // --- Content blocks between the avatar columns: connected non-background regions (on a coarse grid), merged when
+    // they sit side by side on the same rows (glyphs of one line). Unrelated things on the same rows (the mouse
+    // pointer, which the window capture includes) stay separate.
+    struct Block { var top: Int; var bottom: Int; var x0: Int; var x1: Int; var fill: RGB?; var lines: [Line] }
+    let xa = chatLeft + pt(62), xb = chatRight - pt(62)
+    var blocks: [Block] = []
+    do {
+        let c = max(2, pt(2))
+        let gw = max(0, (xb - xa) / c), gh = max(0, (areaBottom - areaTop) / c)
+        var cell = [Bool](repeating: false, count: gw * gh)
+        for gy in 0..<gh {
+            for gx in 0..<gw {
+                let x0 = xa + gx * c, y0 = areaTop + gy * c
+                var hit = false
+                for yy in y0..<(y0 + c) where !hit { for xx in x0..<(x0 + c) where fg(xx, yy) { hit = true; break } }
+                cell[gy * gw + gx] = hit
             }
-            y += 1
         }
-        guard let t = top, bottom - t >= pt(10), maxX - minX >= pt(10) else { return nil }
-        return (minX, t, maxX - minX + 3, bottom - t + 1, rows, cut && bottom >= y1 - 2)
+        var parent = Array(0..<(gw * gh))
+        func find(_ i: Int) -> Int { var i = i; while parent[i] != i { parent[i] = parent[parent[i]]; i = parent[i] }; return i }
+        for gy in 0..<gh {
+            for gx in 0..<gw where cell[gy * gw + gx] {
+                let i = gy * gw + gx
+                for (dx, dy) in [(-1, 0), (-1, -1), (0, -1), (1, -1)] {
+                    let nx = gx + dx, ny = gy + dy
+                    if nx >= 0 && nx < gw && ny >= 0 && cell[ny * gw + nx] { let a = find(i), b = find(ny * gw + nx); if a != b { parent[a] = b } }
+                }
+            }
+        }
+        var comp: [Int: Block] = [:]
+        for gy in 0..<gh {
+            for gx in 0..<gw where cell[gy * gw + gx] {
+                let r = find(gy * gw + gx)
+                let x = xa + gx * c, y = areaTop + gy * c
+                if var b = comp[r] { b.x0 = min(b.x0, x); b.x1 = max(b.x1, x + c - 1); b.top = min(b.top, y); b.bottom = max(b.bottom, y + c); comp[r] = b }
+                else { comp[r] = Block(top: y, bottom: y + c, x0: x, x1: x + c - 1, fill: nil, lines: []) }
+            }
+        }
+        blocks = Array(comp.values)
+        var changed = true
+        while changed {
+            changed = false
+            blocks.sort { $0.top < $1.top }
+            outer: for a in 0..<blocks.count {
+                for b in (a + 1)..<blocks.count {
+                    let p = blocks[a], q = blocks[b]
+                    let vGap = max(p.top, q.top) - min(p.bottom, q.bottom)
+                    let hGap = max(p.x0, q.x0) - min(p.x1, q.x1)
+                    if vGap <= pt(2) && hGap <= pt(24) {
+                        blocks[a] = Block(top: min(p.top, q.top), bottom: max(p.bottom, q.bottom), x0: min(p.x0, q.x0), x1: max(p.x1, q.x1), fill: nil, lines: [])
+                        blocks.remove(at: b); changed = true; break outer
+                    }
+                }
+            }
+        }
+        // Clamp to the area so the top / bottom tests below are exact.
+        blocks = blocks.map { var b = $0; b.top = max(b.top, areaTop); b.bottom = min(b.bottom, areaBottom); return b }
     }
-    /// A text bubble has a flat fill (green for self, white / dark grey for others) just inside its top edge,
-    /// where glyphs never reach; an image does not.
-    func isTextBubble(side: String, box b: (x: Int, y: Int, w: Int, h: Int, rows: [Int: (Int, Int)], cut: Bool), lines: [Line]) -> Bool {
-        if let firstY = lines.map({ $0.y }).min() {
-            // Enlarged short messages (big font) have a taller top padding, so allow a share of the bubble height.
-            guard firstY - Double(b.y) <= max(Double(pt(18)), Double(b.h) * 0.35) else { return false }
-        } else if b.h > pt(90) {
-            return false // no text found: only a small bubble can still be a text bubble OCR missed (e.g. "……")
-        }
+    blocks = blocks.filter { $0.bottom - $0.top >= pt(4) || $0.top <= areaTop + 1 || $0.bottom >= areaBottom - 1 }
+    /// Flat bubble fill: green for self, a neutral grey a bit darker (light theme) / lighter (dark theme) than the background.
+    func bubbleFill(_ b: Block) -> RGB? {
+        let m = pt(2)
+        guard b.x1 - b.x0 > 2 * m + pt(6), b.bottom - b.top > 2 * m + pt(6) else { return nil }
         var pts: [(Int, Int)] = []
-        for dy in [pt(3), pt(6)] {
-            guard let r = b.rows[b.y + dy], r.1 - r.0 > pt(24) else { continue }
-            let (lo, hi) = r
-            for i in 0..<12 { pts.append((lo + pt(10) + (hi - lo - pt(20)) * i / 11, b.y + dy)) }
-        }
-        guard pts.count >= 12 else { return false }
+        let rows = max(4, (b.bottom - b.top) / pt(5))
+        for i in 0..<rows { for j in 0..<16 { pts.append((b.x0 + m + (b.x1 - b.x0 - 2 * m) * j / 15, b.top + m + (b.bottom - b.top - 2 * m) * i / (rows - 1))) } }
         let (c, share) = bmp.mode(pts)
-        if share < 0.85 { return false }
-        if side == "self" { return c.isGreen }
-        return dark ? (c.lum >= 28 && c.lum <= 95) : c.lum >= 232
+        guard share >= 0.45, c.dist(chatBg) > 4 else { return nil }
+        if c.isGreen { return c }
+        let neutral = abs(c.r - c.g) <= 8 && abs(c.g - c.b) <= 8
+        let d = c.lum - chatBg.lum
+        if neutral && (dark ? (d >= 5 && d <= 60) : (d <= -5 && d >= -45)) { return c }
+        return nil
+    }
+    for i in blocks.indices {
+        let b = blocks[i]
+        blocks[i].fill = bubbleFill(b)
+        blocks[i].lines = chatLines.filter { $0.midY >= Double(b.top) - 2 && $0.midY <= Double(b.bottom) + 2 && $0.midX >= Double(b.x0) - 2 && $0.midX <= Double(b.x1) + 2 }
+    }
+
+    // The window capture includes the mouse pointer: a small textless, fill-less blob away from both bubble columns.
+    blocks = blocks.filter { b in
+        // "3条新消息" / "回到最新" pills float over the chat.
+        if b.fill == nil, !b.lines.isEmpty, isNoise(joinLines(b.lines)) { return false }
+        return !(b.fill == nil && b.lines.isEmpty && b.x0 > chatLeft + pt(80) && b.x1 < chatRight - pt(80) && b.x1 - b.x0 < pt(40) && b.bottom - b.top < pt(40))
     }
 
     /// "……" / "…" when the bubble holds only a row of small, equal, evenly spaced dots on one baseline.
-    func dotsText(_ b: (x: Int, y: Int, w: Int, h: Int, rows: [Int: (Int, Int)], cut: Bool)) -> String? {
+    func dotsText(_ b: Block, fill: RGB) -> String? {
         let inset = pt(6)
-        let fill = bmp.mode((0..<10).map { (b.x + inset + (b.w - 2 * inset) * $0 / 9, b.y + pt(3)) }).0
-        var cols: [Int: (Int, Int)] = [:] // x → (minY, maxY) of glyph pixels
-        for x in (b.x + inset)..<(b.x + b.w - inset) {
-            for y in (b.y + pt(4))..<(b.y + b.h - pt(4)) where bmp.px(x, y).dist(fill) > 60 {
+        var cols: [Int: (Int, Int)] = [:]
+        for x in (b.x0 + inset)..<max(b.x0 + inset, b.x1 - inset) {
+            for y in (b.top + pt(4))..<max(b.top + pt(4), b.bottom - pt(4)) where bmp.px(x, y).dist(fill) > 60 {
                 let c = cols[x] ?? (y, y)
                 cols[x] = (min(c.0, y), max(c.1, y))
             }
@@ -386,71 +404,111 @@ func analyze(path: String, scaleHint: Double?) -> Result {
         return String(repeating: "…", count: max(1, blobs.count / 3))
     }
 
-    // Lines not belonging to any avatar's block that are centred → time / system notices.
-    for (i, a) in avs.enumerated() {
-        let nextTop = i + 1 < avs.count ? Double(avs[i + 1].top) - 2 : Double(areaBottom)
-        let top = Double(a.top) - Double(pt(4))
-        var texts: [String] = []
-        var textLines: [Line] = []
-        var sender: String? = nil
-        var senderBottom: Double? = nil
-        var blockBottom = Double(a.bottom)
-        for (li, l) in msgLines.enumerated() where !used.contains(li) && l.midY >= top && l.midY < nextTop {
-            let isSelfSide = l.midX > chatMid || (a.side == "self" && l.maxX > chatMid)
-            if (a.side == "self") != isSelfSide && abs(l.midX - chatMid) > chatW * 0.08 { continue }
-            let centred = abs(l.midX - chatMid) < chatW * 0.12 && bubbleColor(l) == nil
-            if centred && !(a.side == "other" && l.x < chatMid - chatW * 0.2) { continue }
-            let bc = bubbleColor(l)
-            if bc == nil && a.side == "other" && texts.isEmpty && sender == nil && l.midY < Double(a.top) + Double(pt(20)) {
-                sender = l.text; senderBottom = l.maxY; used.insert(li); continue
+    // --- Blocks → messages. Bubbles / images hug the avatar side (70pt from the edge); centred bare text is a time
+    // stamp or system notice; a small bare line right above a left bubble at an avatar's top is a group sender name.
+    struct Draft { var side: String; var sender: String?; var parts: [(Block, String)]; var top: Int; var bottom: Int; var partial: Bool }
+    var drafts: [Draft] = []
+    var system: [Message] = []
+    var usedAv = Set<String>()
+    var cur: Int? = nil
+    var senderCount = 0
+    func alignedLeft(_ b: Block) -> Bool { b.x0 <= chatLeft + pt(80) }
+    func alignedRight(_ b: Block) -> Bool { b.x1 >= chatRight - pt(80) }
+    var i = 0
+    while i < blocks.count {
+        let b = blocks[i]
+        defer { i += 1 }
+        let text = joinLines(b.lines)
+        let al = alignedLeft(b), ar = alignedRight(b)
+        let centred = !al && !ar && abs(Double(b.x0 - chatLeft) - Double(chatRight - b.x1)) < Double(pt(24))
+        if b.fill == nil && (centred || (al && ar && !b.lines.isEmpty && b.bottom - b.top <= pt(24))) {
+            cur = nil
+            if !text.isEmpty && !isNoise(text) {
+                system.append(Message(side: "system", sender: nil, text: text.replacingOccurrences(of: "\n", with: " "), kind: isTimeLike(text) ? "time" : "system",
+                                      top: Double(b.top), bottom: Double(b.bottom), partial: false))
             }
-            if bc == nil && isTimeLike(l.text) { continue }
-            texts.append(l.text); textLines.append(l); used.insert(li); blockBottom = max(blockBottom, l.maxY)
+            continue
         }
-        if a.side == "other" && sender != nil { isGroup = true }
-        let y0 = senderBottom.map { Int($0) + 1 } ?? a.top - pt(2)
-        let cb = contentBox(from: y0, to: Int(nextTop))
-        let partial = a.top <= areaTop + 1 || (cb?.cut == true && Int(nextTop) >= areaBottom - 2)
-        if !texts.isEmpty && texts.allSatisfy(isNoise) { continue }
-        var kind = texts.isEmpty ? "media" : "text"
-        var text = texts.isEmpty ? "[非文本消息]" : texts.joined(separator: "\n")
-        if let b = cb, !isTextBubble(side: a.side, box: b, lines: textLines) {
-            kind = "image"
-            text = texts.isEmpty ? "[图片]" : "[图片] " + texts.joined(separator: " ")
-        } else if let b = cb, texts.isEmpty {
-            // A text bubble whose glyphs OCR missed at screen size (short / punctuation-only text): read it zoomed in,
-            // and recognise a row of dots (……) from the pixels, since Vision never reports punctuation-only lines.
-            let t = ocrRegion(bmp.cg, CGRect(x: b.x, y: b.y, width: b.w, height: b.h))
-            kind = "text"
-            text = !t.isEmpty && !t.allSatisfy({ "•·.。…⋯ ".contains($0) }) ? t : (dotsText(b) ?? (t.isEmpty ? "[表情/符号]" : "……"))
+        if !text.isEmpty && isNoise(text) { continue }
+        // Bare, textless and detached from both bubble columns: the mouse pointer or another overlay.
+        if b.fill == nil && b.lines.isEmpty && !al && !ar { continue }
+        let side: String
+        if al && !ar { side = "other" } else if ar && !al { side = "self" }
+        else if b.fill?.isGreen == true { side = "self" }
+        else if avR.contains(where: { $0.top < b.bottom && $0.bottom > b.top }) { side = "self" }
+        else if avL.contains(where: { $0.top < b.bottom && $0.bottom > b.top }) { side = "other" }
+        else { side = Double(b.x0 + b.x1) / 2 > chatMid ? "self" : "other" }
+        let avs = side == "self" ? avR : avL
+        let av = avs.first { !usedAv.contains("\(side)\($0.top)") && $0.top >= b.top - pt(8) && $0.top <= b.top + pt(10) }
+        // Every message has its own avatar, so a block without one belongs to the message above (bubble under a sender
+        // name, quoted message, sticker parts) unless a time stamp / the other side came in between.
+        let continues = av == nil && cur != nil && drafts[cur!].side == side
+        if !continues {
+            if let a = av { usedAv.insert("\(side)\(a.top)") }
+            drafts.append(Draft(side: side, sender: nil, parts: [], top: min(b.top, av?.top ?? b.top), bottom: max(b.bottom, av?.bottom ?? 0),
+                                partial: b.top <= areaTop + 1 || (av?.top ?? Int.max) <= areaTop + 1))
+            cur = drafts.count - 1
+            // Group sender name: one small bare line, followed closely by this sender's bubble / image.
+            if side == "other", b.fill == nil, !text.isEmpty, !text.contains("\n"), b.bottom - b.top <= pt(22),
+               let n = blocks[(i + 1)...].first(where: { alignedLeft($0) && !alignedRight($0) }) {
+                if n.top - b.bottom <= pt(12) {
+                    drafts[cur!].sender = text
+                    if av != nil { senderCount += 1 }
+                    continue
+                }
+            }
         }
-        if let b = cb { blockBottom = max(blockBottom, Double(b.y + b.h)) }
-        messages.append(Message(side: a.side, sender: sender, text: text, kind: kind, top: Double(a.top), bottom: blockBottom, partial: partial,
-                                box: cb.map { Box(x: Double($0.x), y: Double($0.y), w: Double($0.w), h: Double($0.h)) }))
+        drafts[cur!].parts.append((b, text))
+        drafts[cur!].bottom = max(drafts[cur!].bottom, b.bottom)
     }
-    // Orphan lines: time stamps / system notices / text of a message whose avatar is scrolled off.
-    for (li, l) in msgLines.enumerated() where !used.contains(li) && !isNoise(l.text) {
-        let centred = abs(l.midX - chatMid) < chatW * 0.15
-        if centred && bubbleColor(l) == nil {
-            messages.append(Message(side: "system", sender: nil, text: l.text, kind: isTimeLike(l.text) ? "time" : "system",
-                                    top: l.y, bottom: l.maxY, partial: false))
-        } else if let first = avs.first, l.midY < Double(first.top) {
-            let side = bubbleColor(l)?.isGreen == true || l.midX > chatMid ? "self" : "other"
-            if let last = messages.firstIndex(where: { $0.partial && $0.top < Double(first.top) && $0.side == side && $0.kind != "time" }) {
-                messages[last].text += "\n" + l.text
+
+    var messages: [Message] = system
+    /// A quoted message under a bubble: bare text with a thin vertical bar on its left edge.
+    func isQuote(_ b: Block) -> Bool {
+        let h = b.bottom - b.top
+        guard b.fill == nil, h >= pt(16), h <= pt(90) else { return false }
+        var bar = 0, gapClear = 0
+        for y in b.top..<b.bottom {
+            if (b.x0..<(b.x0 + pt(3))).contains(where: { fg($0, y) }) { bar += 1 }
+            if !((b.x0 + pt(4))..<(b.x0 + pt(9))).contains(where: { fg($0, y) }) { gapClear += 1 }
+        }
+        return Double(bar) >= Double(h) * 0.8 && Double(gapClear) >= Double(h) * 0.8
+    }
+    for d in drafts where !d.parts.isEmpty {
+        var texts: [String] = [], kind = "", box: Block? = nil, imageText: [String] = [], quotes: [String] = []
+        for (b, t) in d.parts {
+            if isQuote(b) {
+                quotes.append("[引用] " + (t.isEmpty ? "[图片]" : t.replacingOccurrences(of: "\n", with: " ")))
+            } else if let f = b.fill {
+                var tt = t
+                if tt.isEmpty {
+                    // Short / punctuation-only text OCR missed at screen size: read it zoomed in, or recognise a row of dots.
+                    let z = ocrRegion(bmp.cg, CGRect(x: b.x0, y: b.top, width: b.x1 - b.x0, height: b.bottom - b.top))
+                    tt = !z.isEmpty && !z.allSatisfy({ "•·.。…⋯ ".contains($0) }) ? z : (dotsText(b, fill: f) ?? (z.isEmpty ? "[表情]" : "……"))
+                }
+                texts.append(tt)
+                if kind != "text" { kind = "text"; box = b }
+            } else if kind == "text" && !t.isEmpty && b.bottom - b.top <= pt(48) {
+                texts.append("[引用] " + t.replacingOccurrences(of: "\n", with: " ")) // quoted message under a bubble
             } else {
-                messages.append(Message(side: side, sender: nil, text: l.text, kind: "text", top: l.y, bottom: l.maxY, partial: true))
+                if kind == "" { kind = "image"; box = b }
+                else if kind == "image", let bb = box { box = Block(top: bb.top, bottom: b.bottom, x0: min(bb.x0, b.x0), x1: max(bb.x1, b.x1), fill: nil, lines: []) }
+                if !t.isEmpty { imageText.append(t.replacingOccurrences(of: "\n", with: " ")) }
             }
         }
+        var text: String
+        if kind == "text" { text = texts.joined(separator: "\n") }
+        else if kind == "image" { text = imageText.isEmpty ? "[图片]" : "[图片] " + imageText.joined(separator: " ") }
+        else { kind = "text"; text = "" }
+        text = ([text] + quotes).filter { !$0.isEmpty }.joined(separator: "\n")
+        let last = d.parts.last!.0
+        let partial = d.partial || last.bottom >= areaBottom - 1
+        messages.append(Message(side: d.side, sender: d.sender, text: text, kind: kind, top: Double(d.top), bottom: Double(d.bottom), partial: partial,
+                                box: box.map { Box(x: Double($0.x0), y: Double($0.top), w: Double($0.x1 - $0.x0 + 1), h: Double($0.bottom - $0.top)) }))
     }
     messages.sort { $0.top < $1.top }
-    // Merge consecutive orphan fragments of the same partial message.
-    var compact: [Message] = []
-    for m in messages {
-        if var last = compact.last, last.partial, m.partial, last.side == m.side, last.kind == "text", m.kind == "text", m.top - last.bottom < Double(pt(16)) {
-            last.text += "\n" + m.text; last.bottom = m.bottom; compact[compact.count - 1] = last
-        } else { compact.append(m) }
-    }
+    if !isGroup && senderCount >= 1 && titleLine == nil { isGroup = true }
+    let compact = messages
 
     // --- Sessions list.
     var sessions: [Session] = []

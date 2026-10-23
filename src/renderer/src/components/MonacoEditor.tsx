@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import Editor, { loader, type EditorProps } from '@monaco-editor/react';
 import * as monaco from 'monaco-editor';
 import { docAt, docMarkdown, keysAt } from '@shared/fieldDocs';
@@ -48,11 +49,22 @@ interface Props {
   options?: EditorProps['options'];
   onSave?: () => void;
   /** Receives the editor instance (e.g. to jump to a line). */
-  onReady?: (editor: monaco.editor.IStandaloneCodeEditor) => void;
+  onReady?: (editor: monaco.editor.IStandaloneCodeEditor | null) => void;
 }
 
 /** VS Code editor (Monaco). Works as a controlled antd Form control. */
 export default function CodeEditor({ value, onChange, language = 'plaintext', height = 200, options, onSave, onReady }: Props) {
+  // The editor is created asynchronously and disposed on unmount (modal closed, page switched): never touch it after that,
+  // and keep the latest callbacks in refs (the Ctrl+S command is registered only once).
+  const alive = useRef(true);
+  const saveRef = useRef(onSave);
+  const readyRef = useRef(onReady);
+  saveRef.current = onSave;
+  readyRef.current = onReady;
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; readyRef.current?.(null); };
+  }, []);
   return (
     <div style={{ border: '1px solid #e5e7eb', borderRadius: 6, overflow: 'hidden', height }}>
       <Editor
@@ -61,7 +73,11 @@ export default function CodeEditor({ value, onChange, language = 'plaintext', he
         height="100%"
         theme="vs"
         onChange={(v) => onChange?.(v ?? '')}
-        onMount={(editor, m) => { if (onSave) editor.addCommand(m.KeyMod.CtrlCmd | m.KeyCode.KeyS, onSave); onReady?.(editor); }}
+        onMount={(editor, m) => {
+          if (!alive.current) return;
+          try { editor.addCommand(m.KeyMod.CtrlCmd | m.KeyCode.KeyS, () => saveRef.current?.()); } catch { /* disposed meanwhile */ }
+          readyRef.current?.(editor);
+        }}
         options={{
           minimap: { enabled: false }, fontSize: 12, lineHeight: 19, tabSize: 2, scrollBeyondLastLine: false,
           wordWrap: language === 'markdown' || language === 'plaintext' ? 'on' : 'off', automaticLayout: true,

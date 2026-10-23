@@ -62,7 +62,42 @@ export interface HarnessConfig {
   sessionPerChat: boolean;
   /** Pass the configured MCP servers of the agent to the harness via --mcp-config. */
   passMcpServers: boolean;
+  /** Give the harness the agent's built-in / custom tools (and memory / skill tools) through a local proxy MCP server. */
+  toolProxy: boolean;
+  /** Turn off the CLI's own auto-memory (CODEBUDDY_DISABLE_AUTO_MEMORY / CLAUDE_CODE_DISABLE_AUTO_MEMORY): ours replaces it. */
+  disableNativeMemory: boolean;
+  /** codebuddy only: keep a prewarmed `codebuddy --prewarm` process on standby; cwd and arguments are bound at activation. */
+  prewarm: boolean;
 }
+
+export interface MemoryConfig {
+  /** Master switch of memory: the memory section of the system prompt + file tools for the memory dir. */
+  enabled: boolean;
+  /** How many global memories the system prompt lists (session memories are never listed, only searchable). */
+  indexLimit: number;
+  /** Consolidate ("dream") a chat's memory after this many new messages; 0 = only manually. */
+  dreamEveryMessages: number;
+  /** Agent that writes the consolidation (default: first agent). */
+  dreamAgent?: string;
+}
+
+export interface SkillConfig {
+  id: string;
+  name?: string;
+  description: string;
+  /** global = every chat; session = only `chat`. */
+  scope: 'global' | 'session';
+  chat?: string;
+  enabled: boolean;
+  /** Body of SKILL.md, written to disk when the file does not exist yet; afterwards the file on disk is authoritative. */
+  content?: string;
+}
+
+/** A memory file (global, or one chat's) as listed on the 记忆 page. */
+export interface MemorySummary { scope: 'global' | 'session'; chat?: string; entries: number; updatedAt: number; file: string }
+
+/** A skill found on disk; `enabled` comes from the config (default on). */
+export interface SkillInfo { id: string; scope: 'global' | 'session'; chat?: string; description: string; enabled: boolean; file: string }
 
 export interface ToolConfig {
   id: string;
@@ -94,10 +129,26 @@ export interface McpServerConfig {
   enabled: boolean;
 }
 
+/** A reply example attached to a prompt: how to answer (good) or how not to (bad) in a given context. */
+export interface PromptCase {
+  /** The conversation before the reply, one "speaker: text" per line. */
+  context?: string;
+  reply: string;
+  /** Why it is good / bad. */
+  note?: string;
+  /** Where it was marked (会话记录): chat name and message ids. */
+  chat?: string;
+  ids?: string[];
+  at?: number;
+}
+
 export interface PromptConfig {
   id: string;
   name?: string;
   content: string;
+  /** Appended to the content as reply examples to follow / avoid. */
+  goodCases?: PromptCase[];
+  badCases?: PromptCase[];
 }
 
 export interface AgentConfig {
@@ -158,6 +209,10 @@ export interface AppConfig {
   builtinTools: Record<string, boolean>;
   tools: ToolConfig[];
   mcpServers: McpServerConfig[];
+  memory: MemoryConfig;
+  /** Skills switch, independent of memory: skill index in the prompt + file tools for the skills dir. */
+  skillsEnabled: boolean;
+  skills: SkillConfig[];
   prompts: PromptConfig[];
   agents: AgentConfig[];
   rules: RuleConfig[];
@@ -217,13 +272,18 @@ export interface ChatMessage {
  * prompt (`prompts[]` of the config, id = `prompt`); the chat only keeps the link and the on/off switch.
  */
 export interface Persona {
-  /** Id of the prompt holding the text. */
+  /** Id of the prompt in use: the chat's own persona prompt or any other prompt switched to in 会话记录. */
   prompt: string;
+  /** Id of the chat's own persona prompt (generated / edited in the persona dialog, holds the reply examples). */
+  own: string;
+  /** Text of the own prompt. */
   text: string;
   enabled: boolean;
   updatedAt: number;
   /** How it was made, e.g. "最近 7 天 · 312 条 · 从微信读取"; empty when hand-written. */
   source?: string;
+  goodCases: PromptCase[];
+  badCases: PromptCase[];
 }
 
 export interface PersonaOptions {
@@ -246,7 +306,8 @@ export interface ChatSummary {
   paused: boolean;
   /** Per-chat send mode; 'inherit' = rule / global setting. */
   mode: ReplyMode | 'inherit';
-  persona?: { enabled: boolean };
+  /** prompt: id of the prompt in use. */
+  persona?: { enabled: boolean; prompt: string };
 }
 
 export interface Draft {
@@ -293,8 +354,12 @@ export interface TestAgentRequest {
   agent: string;
   chat: string;
   isGroup: boolean;
-  messages: Array<{ side: 'self' | 'other'; sender?: string; text: string }>;
+  /** image: data URL of a picture message; text is then the text inside it (empty = OCR it). */
+  messages: Array<{ side: 'self' | 'other'; sender?: string; text: string; image?: string }>;
 }
+
+/** One block of the full request / response log of an agent run (debug panel). images: local file paths. */
+export interface DebugSection { title: string; text: string; images?: string[] }
 
 export interface TestAgentResult {
   ok: boolean;
@@ -302,6 +367,7 @@ export interface TestAgentResult {
   skipped?: boolean;
   error?: string;
   trace: string[];
+  detail?: DebugSection[];
   ms: number;
 }
 
@@ -328,6 +394,8 @@ export interface RelayApi {
   getHistory(chat: string): Promise<ChatMessage[]>;
   setChatPaused(chat: string, paused: boolean): Promise<void>;
   clearHistory(chat: string): Promise<void>;
+  /** Deletes chats with their records and per-chat settings; returns how many were deleted. */
+  deleteChats(chats: string[]): Promise<number>;
   getDrafts(): Promise<Draft[]>;
   approveDraft(id: string, text?: string): Promise<void>;
   rejectDraft(id: string): Promise<void>;
@@ -342,11 +410,27 @@ export interface RelayApi {
   getPersona(chat: string): Promise<Persona | null>;
   /** text empty = remove the persona. */
   setPersona(chat: string, persona: { text: string; enabled: boolean }): Promise<void>;
+  /** Switches the chat to another prompt as its persona (null = no persona, use the agent's prompt). */
+  selectPersona(chat: string, prompt: string | null): Promise<Persona | null>;
+  /** Agent replying in the chat (by reply rule) and the prompt it uses when the chat has no persona. */
+  agentPrompt(chat: string): Promise<{ agent: string; prompt?: string } | null>;
+  /** Replaces the reply examples of the chat's persona prompt (created, switched off, when the chat has none). */
+  setPersonaCases(chat: string, cases: { goodCases: PromptCase[]; badCases: PromptCase[] }): Promise<Persona>;
   /** Reads the chat history (optionally from WeChat), has an agent summarise the tone / style, saves and returns it. */
   generatePersona(chat: string, opts: PersonaOptions): Promise<{ persona: Persona; count: number; note?: string }>;
   testAgent(req: TestAgentRequest): Promise<TestAgentResult>;
   listMcpTools(serverId: string): Promise<Array<{ name: string; description?: string }>>;
   /** Writes a script tool's files and installs its dependencies; rejects with the npm output on failure. */
   prepareTool(tool: ToolConfig): Promise<void>;
+  /** Memory files: the global one plus one per chat that has any. */
+  listMemory(): Promise<MemorySummary[]>;
+  readMemory(scope: 'global' | 'session', chat?: string): Promise<string>;
+  writeMemory(scope: 'global' | 'session', chat: string | undefined, text: string): Promise<void>;
+  listSkills(): Promise<SkillInfo[]>;
+  readSkill(scope: 'global' | 'session', chat: string | undefined, id: string): Promise<string>;
+  writeSkill(scope: 'global' | 'session', chat: string | undefined, id: string, text: string): Promise<void>;
+  deleteSkill(scope: 'global' | 'session', chat: string | undefined, id: string): Promise<void>;
+  /** Consolidates the memory of `chat` (and the global one) with the dream agent; chat omitted = global memory only. */
+  dreamMemory(chat?: string): Promise<{ message: string }>;
   onEvent(cb: (e: RelayEvent) => void): () => void;
 }

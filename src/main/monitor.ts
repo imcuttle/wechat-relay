@@ -1,8 +1,10 @@
 import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AppConfig, ChatMessage, Draft, MonitorStatus, PersonaOptions, RuleConfig, VisionMessage } from '@shared/types';
+import { casesText, personaPromptId, promptText } from '@shared/prompt';
+import type { AppConfig, ChatMessage, Draft, MonitorStatus, PersonaOptions, PromptConfig, RuleConfig, VisionMessage } from '@shared/types';
 import { completeText, runAgent } from './agent/engine';
+import { noteMessages } from './agent/dream';
 import { ContextWindows } from './agent/window';
 import { CONFIG_PATH, MEDIA_DIR } from './config';
 import { CuaDriver } from './driver';
@@ -108,6 +110,7 @@ const PERSONA_SYSTEM = `你是一位擅长分析聊天风格的助手。你会�
 - 用中文输出，第二人称（"你"）写成给代写者的指令。只写人设与语气本身：不要写「你正在以…身份聊天」之类的开场白，也不要写回复要求、[SKIP]、模板变量，这些由系统补充。不要任何寒暄或额外解释。
 - 覆盖：与对方的关系和称呼方式；整体语气（亲昵/客气/调侃/正式…）；句子长短与节奏；口头禅、常用词、语气词、网络用语；标点、表情/emoji/表情包文字的使用习惯；常聊的话题与立场；回复习惯（秒回/简短/爱追问/爱发语音等）；需要避免的说法。
 - 末尾给出 3~5 条「我」的典型原话作为示例（原样摘录，不要编造）。
+- 如果附有「用户标注的示例」：好例是我认可的回复方式，重点从中提炼风格和处理方式；反例是要避免的回复，把其中的问题总结进「需要避免的说法」。这些示例会原样附在最终提示词后面，不必复述。
 - 总长度控制在 600 字以内，条理清晰，可使用短列表。`;
 
 /** Same structure as the default prompt (variables, group block, reply rules, [SKIP]) around the generated style text. */
@@ -125,7 +128,7 @@ ${style.trim()}
 - 如果对方的消息不需要回复（如表情、"好的"、群里与你无关的闲聊），调用 skip_reply 工具或只输出 [SKIP]。`;
 }
 
-function personaTranscript(chat: string, isGroup: boolean, msgs: ChatMessage[], myNickname: string): string {
+function personaTranscript(chat: string, isGroup: boolean, msgs: ChatMessage[], myNickname: string, cases?: PromptConfig): string {
   const fmt = (t: number) => { const d = new Date(t); const p = (n: number) => String(n).padStart(2, '0'); return `${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`; };
   const lines = msgs.map((m) => {
     const who = m.side === 'self' ? (m.source === 'bot' ? '我[代发]' : '我') : isGroup ? m.sender || '群成员' : chat;
@@ -134,7 +137,9 @@ function personaTranscript(chat: string, isGroup: boolean, msgs: ChatMessage[], 
   // Keep the most recent part when the transcript is huge.
   let total = 0, from = lines.length;
   while (from > 0 && total + lines[from - 1].length < 60000) total += lines[--from].length + 1;
-  return `会话：${chat}（${isGroup ? '群聊' : '私聊'}）${myNickname ? `；我的昵称：${myNickname}` : ''}\n共 ${lines.length - from} 条消息：\n\n${lines.slice(from).join('\n')}\n\n请输出「我」在该会话中的人设与语气总结。`;
+  const marked = cases ? casesText(cases) : '';
+  return `会话：${chat}（${isGroup ? '群聊' : '私聊'}）${myNickname ? `；我的昵称：${myNickname}` : ''}\n共 ${lines.length - from} 条消息：\n\n${lines.slice(from).join('\n')}\n\n` +
+    `${marked ? `# 用户标注的示例\n\n${marked}\n\n` : ''}请输出「我」在该会话中的人设与语气总结。`;
 }
 
 /** Serialises everything that touches the WeChat window. */
@@ -185,7 +190,12 @@ export class Monitor extends EventEmitter {
   /** Text of the chat's persona prompt, when the persona is on. */
   private personaText(chat: string): string | undefined {
     const p = store.chat(chat)?.persona;
-    return p?.enabled ? this.cfg.prompts.find((x) => x.id === p.prompt)?.content : undefined;
+    const prompt = p?.enabled ? this.cfg.prompts.find((x) => x.id === p.prompt) : undefined;
+    // A persona that only has examples so far (no text yet) does not replace the agent's prompt.
+    if (!prompt?.content.trim()) return undefined;
+    // The chat's examples (on its own persona prompt) also apply when it switched to another prompt.
+    const own = prompt.id === personaPromptId(chat) ? undefined : this.cfg.prompts.find((x) => x.id === personaPromptId(chat));
+    return [promptText(prompt), own ? casesText(own) : ''].filter(Boolean).join('\n\n');
   }
 
   getStatus(): MonitorStatus { return { ...this.status, busy: this.lock.busy }; }
@@ -374,6 +384,7 @@ export class Monitor extends EventEmitter {
     const msgs = fresh.map(toMessage);
     for (const m of msgs) this.emit('chat', name, m);
     store.append(name, msgs);
+    noteMessages(this.cfg, name, msgs.length);
     log.info(`「${name}」新消息 ${msgs.length} 条：${msgs.map((m) => `${m.side === 'self' ? '我' : m.sender || '对方'}: ${m.text}`).join(' / ').slice(0, 200)}`);
 
     // A message typed by the user themself cancels a pending auto-reply.
@@ -628,7 +639,7 @@ export class Monitor extends EventEmitter {
 
     const t0 = Date.now();
     log.info(`「${name}」生成人设 → agent ${agent}（${msgs.length} 条）`);
-    const text = await completeText(this.cfg, agent, PERSONA_SYSTEM, personaTranscript(name, state.isGroup, msgs, this.cfg.general.myNickname));
+    const text = await completeText(this.cfg, agent, PERSONA_SYSTEM, personaTranscript(name, state.isGroup, msgs, this.cfg.general.myNickname, this.cfg.prompts.find((x) => x.id === personaPromptId(name))));
     if (!text) throw new Error('模型没有返回内容');
     const source = `${minutes > 0 ? `最近 ${minutes >= 1440 ? `${Math.round(minutes / 1440)} 天` : `${minutes} 分钟`}` : '不限时间'} · ${msgs.length} 条 · ${fromWeChat ? '从微信读取' : '本地记录'}`;
     log.info(`「${name}」人设已生成（${Date.now() - t0}ms）`);
@@ -747,16 +758,25 @@ export class Monitor extends EventEmitter {
    * Generates a reply for `chat` from its stored history without sending it (for review / manual send). The agent is
    * `agentId`, else the one of the matching reply rule, else the first agent. Does not touch WeChat.
    */
+  /** Agent a manual reply for the chat uses: the one of the reply rule matching its latest messages, else the first. */
+  agentFor(chat: string): { agent?: string; incoming: ChatMessage[] } {
+    const state = store.chat(chat);
+    const all = store.history(chat);
+    let i = all.length;
+    while (i > 0 && all[i - 1].side === 'other') i--;
+    const incoming = all.slice(i);
+    const rule = state && all.length ? matchRule(this.cfg, { chat, isGroup: state.isGroup, messages: incoming.length ? incoming : all.slice(-1) }) : null;
+    return { agent: (rule?.action === 'reply' ? rule.agent : undefined) || this.cfg.agents[0]?.id, incoming };
+  }
+
   async generateReply(chat: string, agentId?: string): Promise<{ text: string | null; agent: string; reason?: string; ms: number }> {
     const state = store.chat(chat);
     if (!state) throw new Error(`没有「${chat}」的会话记录`);
     const all = store.history(chat);
     if (!all.length) throw new Error('该会话还没有消息记录，无法生成回复');
-    let i = all.length;
-    while (i > 0 && all[i - 1].side === 'other') i--;
-    const incoming = all.slice(i);
-    const rule = matchRule(this.cfg, { chat, isGroup: state.isGroup, messages: incoming.length ? incoming : all.slice(-1) });
-    const agent = agentId || (rule?.action === 'reply' ? rule.agent : undefined) || this.cfg.agents[0]?.id;
+    const picked = this.agentFor(chat);
+    const incoming = picked.incoming;
+    const agent = agentId || picked.agent;
     if (!agent) throw new Error('没有可用的 agent');
     const g = this.cfg.general;
     const since = g.historyMinutes > 0 ? Date.now() - g.historyMinutes * 60000 : 0;

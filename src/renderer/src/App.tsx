@@ -1,6 +1,6 @@
 import { Activity as KeepAlive, useState, type ReactElement } from 'react';
 import { App as AntApp, Badge, Button, Layout, Menu, Segmented, Space, Switch, Tag, Tooltip, Typography } from 'antd';
-import { Activity, Bot, Code, Cpu, FileText, Inbox, ListFilter, MessagesSquare, Play, ScrollText, Square, Wrench } from 'lucide-react';
+import { Activity, Bot, Brain, Code, Cpu, FileText, Sparkles, Inbox, ListFilter, MessagesSquare, Play, ScrollText, Square, Wrench } from 'lucide-react';
 import ErrorBoundary from './components/ErrorBoundary';
 import { RelayProvider, errMsg, useRelay } from './relay';
 import Dashboard from './pages/Dashboard';
@@ -11,6 +11,8 @@ import Agents from './pages/Agents';
 import Providers from './pages/Providers';
 import Tools from './pages/Tools';
 import Prompts from './pages/Prompts';
+import Memory from './pages/Memory';
+import Skills from './pages/Skills';
 import Logs from './pages/Logs';
 import YamlPage from './pages/Yaml';
 
@@ -29,7 +31,7 @@ function Shell() {
 
   const pages: Record<string, ReactElement> = {
     dashboard: <Dashboard />, chats: <Chats />, drafts: <Drafts />, rules: <Rules />, agents: <Agents />,
-    providers: <Providers />, tools: <Tools />, prompts: <Prompts />, logs: <Logs />, yaml: <YamlPage />,
+    providers: <Providers />, tools: <Tools />, prompts: <Prompts />, memory: <Memory />, skills: <Skills />, logs: <Logs />, yaml: <YamlPage />,
   };
 
   const driverTag = !status ? null
@@ -60,6 +62,8 @@ function Shell() {
             { key: 'providers', icon: icon(Cpu), label: '模型 / Harness' },
             { key: 'tools', icon: icon(Wrench), label: '工具 / MCP' },
             { key: 'prompts', icon: icon(FileText), label: '提示词' },
+            { key: 'memory', icon: icon(Brain), label: '记忆' },
+            { key: 'skills', icon: icon(Sparkles), label: 'Skill' },
             { type: 'divider' },
             { key: 'logs', icon: icon(ScrollText), label: '运行日志' },
             { key: 'yaml', icon: icon(Code), label: 'YAML 配置' },

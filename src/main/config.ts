@@ -16,6 +16,10 @@ export const WORKSPACE_DIR = join(DATA_DIR, 'workspace');
 export const CACHE_DIR = process.env.WECHAT_RELAY_HOME ? join(DATA_DIR, 'cache') : join(homedir(), 'Library', 'Caches', 'wechat-relay');
 /** Compressed crops of image messages, referenced by stored chat history. */
 export const MEDIA_DIR = join(DATA_DIR, 'media');
+/** Memories: global.md plus sessions/<slug>.md per chat. Plain Markdown, edited with the generic file tools. */
+export const MEMORY_DIR = join(DATA_DIR, 'memory');
+/** Skills: global/<id>/SKILL.md and sessions/<slug>/<id>/SKILL.md. */
+export const SKILLS_DIR = join(DATA_DIR, 'skills');
 
 const DEFAULT_YAML = `# WeChat Relay 配置（保存后自动热加载，也可在应用界面中编辑）
 # 字符串中的 \${ENV_NAME} 会在使用时替换为环境变量。
@@ -65,6 +69,9 @@ harnesses:
     timeoutMs: 180000
     sessionPerChat: true
     passMcpServers: true
+    toolProxy: true
+    disableNativeMemory: true
+    prewarm: true
   - id: claude-code
     type: claude-code
     command: claude
@@ -72,6 +79,8 @@ harnesses:
     timeoutMs: 180000
     sessionPerChat: true
     passMcpServers: true
+    toolProxy: true
+    disableNativeMemory: true
 
 tools:
   - id: weather
@@ -89,6 +98,15 @@ mcpServers:
     enabled: false
     command: uvx
     args: [mcp-server-fetch]
+
+memory:
+  enabled: false            # 记忆总开关：开启后系统提示词带「全局记忆索引」和读写说明，智能体可用文件工具读写 ~/.wechat-relay/memory
+  indexLimit: 12            # 提示词里最多列几条全局记忆（会话记忆不列出，但可用 grep / read 查到）
+  dreamEveryMessages: 100   # 每个会话新增这么多条消息后自动「做梦」整理记忆；0 = 只手动
+  # dreamAgent: assistant   # 做梦使用的智能体，默认第一个
+
+skillsEnabled: false        # Skill 总开关（与记忆互相独立）：开启后提示词带 skill 索引和路径说明
+skills: []                  # 在「Skill」页管理；文件在 ~/.wechat-relay/skills，这里只保存各 skill 的启用开关和初始内容
 
 prompts:
   - id: default
@@ -158,13 +176,16 @@ function normalize(raw: Partial<AppConfig> | null | undefined): AppConfig {
     general: { ...DEFAULTS.general, ...(c.general ?? {}) },
     driver: { ...DEFAULTS.driver, ...(c.driver ?? {}) },
     providers: withDefaults(arr(c.providers), { type: 'openai', apiKey: '' }),
-    harnesses: withDefaults(arr(c.harnesses), { args: [], timeoutMs: 180000, sessionPerChat: true, passMcpServers: true }),
+    harnesses: withDefaults(arr(c.harnesses), { args: [], timeoutMs: 180000, sessionPerChat: true, passMcpServers: true, toolProxy: true, disableNativeMemory: true, prewarm: true }),
     builtinTools: {
       ...Object.fromEntries(BUILTIN_TOOLS.map((b) => [b.id, b.defaultEnabled])),
       ...(c.builtinTools && typeof c.builtinTools === 'object' ? c.builtinTools : {}),
     },
     tools: withDefaults(arr(c.tools), { type: 'command', enabled: true, parameters: { type: 'object', properties: {} }, timeoutMs: 15000 }),
     mcpServers: withDefaults(arr(c.mcpServers), { enabled: true }),
+    memory: { ...DEFAULTS.memory, ...(c.memory ?? {}) },
+    skillsEnabled: c.skillsEnabled === true,
+    skills: withDefaults(arr(c.skills), { scope: 'global', enabled: true, description: '' }),
     prompts: withDefaults(arr(c.prompts), { content: '' }),
     agents: withDefaults(arr(c.agents), { engine: 'model', tools: [], maxToolRounds: 4, vision: false, maxImages: 4, imageDetail: 'low' }),
     rules: withDefaults(arr(c.rules), { enabled: true, action: 'reply', cooldownSec: 0, mode: 'inherit' }).map((r) => ({ ...r, match: r.match ?? {} })),
@@ -175,6 +196,9 @@ function normalize(raw: Partial<AppConfig> | null | undefined): AppConfig {
 export function expandEnv(value: string | undefined): string {
   return (value ?? '').replace(/\$\{([A-Z0-9_]+)\}/gi, (_, k: string) => process.env[k] ?? '');
 }
+
+/** Directories the agent may touch through the scoped file tools, by what is switched on. */
+export const knowledgeDirs = (c: AppConfig): string[] => [...(c.memory.enabled ? [MEMORY_DIR] : []), ...(c.skillsEnabled ? [SKILLS_DIR] : [])];
 
 class ConfigStore extends EventEmitter {
   config: AppConfig = DEFAULTS;

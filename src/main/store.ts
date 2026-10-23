@@ -12,7 +12,7 @@ export function dropImages(msgs: ChatMessage[]): void {
 }
 
 /** The persona text is a prompt in the config; the chat only links to it. */
-export type PersonaMeta = Omit<Persona, 'text'>;
+export type PersonaMeta = Omit<Persona, 'text' | 'own' | 'goodCases' | 'badCases'>;
 
 interface ChatState { isGroup: boolean; paused: boolean; messages: ChatMessage[]; lastReplyAt?: Record<string, number>; mode?: ReplyMode; persona?: PersonaMeta }
 interface State { chats: Record<string, ChatState>; drafts: Draft[] }
@@ -85,7 +85,7 @@ class Store {
     return Object.entries(this.s.chats)
       .map(([name, c]) => {
         const last = c.messages[c.messages.length - 1];
-        return { name, isGroup: c.isGroup, paused: c.paused, count: c.messages.length, lastAt: last?.at ?? 0, lastText: last?.image ? '[图片]' : last?.text ?? '', mode: (c.mode ?? 'inherit') as ReplyMode | 'inherit', persona: c.persona ? { enabled: c.persona.enabled } : undefined };
+        return { name, isGroup: c.isGroup, paused: c.paused, count: c.messages.length, lastAt: last?.at ?? 0, lastText: last?.image ? '[图片]' : last?.text ?? '', mode: (c.mode ?? 'inherit') as ReplyMode | 'inherit', persona: c.persona ? { enabled: c.persona.enabled, prompt: c.persona.prompt } : undefined };
       })
       .sort((a, b) => b.lastAt - a.lastAt);
   }
@@ -110,6 +110,20 @@ class Store {
     dropImages(c.messages);
     if (c.mode || c.persona) { c.messages = []; delete c.lastReplyAt; } else delete this.s.chats[name];
     this.save();
+  }
+
+  /** Deletes chats entirely: records, image crops and per-chat settings (the persona prompt in the config stays). */
+  remove(names: string[]): number {
+    let n = 0;
+    for (const name of names) {
+      const c = this.s.chats[name];
+      if (!c) continue;
+      dropImages(c.messages);
+      delete this.s.chats[name];
+      n++;
+    }
+    if (n) this.save();
+    return n;
   }
 
   lastReply(name: string, rule: string): number { return this.s.chats[name]?.lastReplyAt?.[rule] ?? 0; }
