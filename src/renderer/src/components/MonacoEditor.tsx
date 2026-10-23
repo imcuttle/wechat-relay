@@ -15,6 +15,12 @@ monaco.typescript.typescriptDefaults.setDiagnosticsOptions({ noSemanticValidatio
 monaco.typescript.typescriptDefaults.setCompilerOptions({ target: monaco.typescript.ScriptTarget.ESNext, module: monaco.typescript.ModuleKind.ESNext, allowNonTsExtensions: true });
 loader.config({ monaco });
 
+// Monaco finishes some async work (hover, completion, TS worker) after its editor was disposed (modal closed, page
+// switched) and then throws "InstantiationService has been disposed". It is harmless: drop just that error.
+const disposedNoise = (m: unknown) => /InstantiationService has been disposed/.test(String((m as Error)?.message ?? m));
+window.addEventListener('unhandledrejection', (e) => { if (disposedNoise(e.reason)) e.preventDefault(); });
+window.addEventListener('error', (e) => { if (disposedNoise(e.error ?? e.message)) e.preventDefault(); });
+
 // config.yaml: hover and key completion with the Chinese field docs (the only YAML editor in the app).
 monaco.languages.registerHoverProvider('yaml', {
   provideHover(model, pos) {

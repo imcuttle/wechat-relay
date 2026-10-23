@@ -102,7 +102,7 @@ export default function Rules() {
           },
           {
             title: '动作', key: 'action', width: 200, render: (_, r) => r.action === 'ignore' ? <Tag>忽略</Tag> : (
-              <Space size={4}><Tag color="green">回复</Tag>{r.agent}{r.mode && r.mode !== 'inherit' && <Tag>{r.mode === 'auto' ? '自动' : '审核'}</Tag>}{r.voice === 'always' && <Tag color="purple">语音</Tag>}</Space>
+              <Space size={4}><Tag color="green">回复</Tag>{r.agent}{r.mode && r.mode !== 'inherit' && <Tag>{r.mode === 'auto' ? '自动' : '审核'}</Tag>}</Space>
             ),
           },
         ]}
@@ -119,7 +119,6 @@ export default function Rules() {
             agent: reply ? (v.agent as string) : undefined,
             mode: reply ? (v.mode as RuleConfig['mode']) : undefined,
             cooldownSec: reply ? Number(v.cooldownSec ?? 0) : 0,
-            voice: reply && v.voice && v.voice !== 'inherit' ? (v.voice as RuleConfig['voice']) : undefined,
             match: {
               chatType, chats: list(v.chats), excludeChats: list(v.excludeChats), keywords: list(v.keywords),
               mentionOnly, includeAtAll: mentionOnly && Boolean(v.includeAtAll), senders: group ? list(v.senders) : [],
@@ -143,7 +142,6 @@ export default function Rules() {
                 <Space align="start">
                   <Form.Item name="agent" label="智能体" rules={[{ required: true }]}><Select style={{ width: 180 }} options={agents.map((a) => ({ value: a.id, label: a.name || a.id }))} /></Form.Item>
                   <Form.Item name="mode" label="发送方式"><Select style={{ width: 140 }} options={[{ value: 'inherit', label: '跟随全局' }, { value: 'review', label: '审核后发送' }, { value: 'auto', label: '自动发送' }]} /></Form.Item>
-                  <Form.Item name="voice" label="语音回复" tooltip="需先在配置里开启 voice；无法安全发语音时（麦克风被占用、未装虚拟声卡等）自动改发文字"><Select style={{ width: 120 }} options={[{ value: 'inherit', label: '仅文字' }, { value: 'always', label: '语音' }]} /></Form.Item>
                   <Form.Item name="cooldownSec" label="冷却（秒）"><InputNumber min={0} style={{ width: 110 }} /></Form.Item>
                 </Space>
               )}</Form.Item>

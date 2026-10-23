@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, watchFile, writeFileSync } from 'n
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import YAML from 'yaml';
-import type { AppConfig } from '@shared/types';
+import type { AppConfig, VoiceConfig } from '@shared/types';
 import { BUILTIN_TOOLS } from '@shared/builtins';
 
 export const DATA_DIR = process.env.WECHAT_RELAY_HOME || join(homedir(), '.wechat-relay');
@@ -105,20 +105,6 @@ memory:
   dreamEveryMessages: 100   # 每个会话新增这么多条消息后自动「做梦」整理记忆；0 = 只手动
   # dreamAgent: assistant   # 做梦使用的智能体，默认第一个
 
-voice:
-  enabled: false            # 语音消息总开关；还需在规则里设 voice: always 才会用语音回复
-  provider: gpt-sovits      # openai | elevenlabs | fish | gpt-sovits | command
-  baseUrl: http://127.0.0.1:9880
-  apiKey: ""
-  # voice: ""               # 音色：openai 的 voice / elevenlabs 的 voice_id / fish 的 reference_id（克隆音色）
-  # refAudio: ~/voice/me.wav  # 你自己的 10-20 秒干净人声样音（gpt-sovits 零样本克隆）
-  # refText: ""             # 样音里说的话（逐字）
-  maxChars: 120             # 超过则改发文字
-  maxSeconds: 45
-  virtualDevice: BlackHole  # 微信录音所用虚拟声卡名称（包含即可）
-  buttonOffset: 47          # 语音按钮到「发送」按钮的距离（点）
-  timeoutMs: 60000
-
 skillsEnabled: false        # Skill 总开关（与记忆互相独立）：开启后提示词带 skill 索引和路径说明
 skills: []                  # 在「Skill」页管理；文件在 ~/.wechat-relay/skills，这里只保存各 skill 的启用开关和初始内容
 
@@ -182,6 +168,12 @@ rules:
 
 const DEFAULTS: AppConfig = YAML.parse(DEFAULT_YAML);
 
+/** Voice messages are not exposed in the UI / default config yet; the code path is dormant unless `voice.enabled` is set by hand. */
+const DEFAULT_VOICE: VoiceConfig = {
+  enabled: false, provider: 'gpt-sovits', baseUrl: 'http://127.0.0.1:9880', apiKey: '',
+  maxChars: 120, maxSeconds: 45, virtualDevice: 'BlackHole', buttonOffset: 47, timeoutMs: 60000,
+};
+
 function normalize(raw: Partial<AppConfig> | null | undefined): AppConfig {
   const c = (raw ?? {}) as Partial<AppConfig>;
   const arr = <T>(v: T[] | undefined): Partial<T>[] => (Array.isArray(v) ? v : []);
@@ -198,7 +190,7 @@ function normalize(raw: Partial<AppConfig> | null | undefined): AppConfig {
     tools: withDefaults(arr(c.tools), { type: 'command', enabled: true, parameters: { type: 'object', properties: {} }, timeoutMs: 15000 }),
     mcpServers: withDefaults(arr(c.mcpServers), { enabled: true }),
     memory: { ...DEFAULTS.memory, ...(c.memory ?? {}) },
-    voice: { ...DEFAULTS.voice, ...(c.voice ?? {}) },
+    voice: { ...DEFAULT_VOICE, ...(c.voice ?? {}) },
     skillsEnabled: c.skillsEnabled === true,
     skills: withDefaults(arr(c.skills), { scope: 'global', enabled: true, description: '' }),
     prompts: withDefaults(arr(c.prompts), { content: '' }),
