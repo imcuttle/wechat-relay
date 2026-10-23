@@ -1,24 +1,21 @@
 import { useState } from 'react';
 import { App, Button, Card, Col, Form, Input, InputNumber, Row, Select, Space, Switch, Tag, Typography } from 'antd';
 import { Bot, Play, Plus, Trash } from 'lucide-react';
+import { BUILTIN_TOOLS, builtinEnabled } from '@shared/builtins';
 import type { AgentConfig, TestAgentResult } from '@shared/types';
 import CodeEditor from '../components/CodeEditor';
 import ConfigList from '../components/ConfigList';
 import { errMsg, useRelay } from '../relay';
 
-const BUILTIN = [
-  { value: 'builtin:time', label: '当前时间 (builtin:time)' },
-  { value: 'builtin:history', label: '读取聊天记录 (builtin:history)' },
-  { value: 'builtin:skip', label: '不回复 (builtin:skip)' },
-];
+const OFF = '（未启用）';
 
 export default function Agents() {
   const { config } = useRelay();
   if (!config) return null;
   const toolOptions = [
-    { label: '内置', options: BUILTIN },
-    { label: '自定义命令', options: config.tools.map((t) => ({ value: t.id, label: `${t.id} — ${t.description}` })) },
-    { label: 'MCP 服务', options: config.mcpServers.map((m) => ({ value: `mcp:${m.id}`, label: `mcp:${m.id}${m.enabled ? '' : '（未启用）'}` })) },
+    { label: '内置', options: BUILTIN_TOOLS.map((b) => ({ value: b.id, label: `${b.label} (${b.id})${builtinEnabled(config.builtinTools, b.id) ? '' : OFF}` })) },
+    { label: '自定义工具', options: config.tools.map((t) => ({ value: t.id, label: `${t.id} — ${t.description}${t.enabled === false ? OFF : ''}` })) },
+    { label: 'MCP 服务', options: config.mcpServers.map((m) => ({ value: `mcp:${m.id}`, label: `mcp:${m.id}${m.enabled ? '' : OFF}` })) },
   ];
   return (
     <div className="page">
@@ -60,13 +57,23 @@ export default function Agents() {
                 <Form.Item name="maxToolRounds" label="工具轮数"><InputNumber min={0} max={20} /></Form.Item>
               </Space>
             )}</Form.Item>
+            <Space style={{ display: 'flex' }} align="start">
+              <Form.Item name="vision" label="支持图片（多模态）" valuePropName="checked"
+                tooltip="打开后聊天里的图片（含我发出的）会压缩后直接作为图片发给模型；模型不支持时自动退回 OCR 文字。Harness 引擎则在记录里附上图片文件路径">
+                <Switch />
+              </Form.Item>
+              <Form.Item name="maxImages" label="每次最多图片数" tooltip="只发送最近的几张，更早的图片用文字代替"><InputNumber min={0} max={20} /></Form.Item>
+              <Form.Item name="imageDetail" label="图片精度" tooltip="low 最省 token（OpenAI / DeepSeek 等兼容接口的 detail 参数）">
+                <Select style={{ width: 100 }} options={['low', 'auto', 'high'].map((v) => ({ value: v, label: v }))} />
+              </Form.Item>
+            </Space>
             <Form.Item name="prompt" label="提示词模板"><Select allowClear options={config.prompts.map((p) => ({ value: p.id, label: p.name || p.id }))} /></Form.Item>
             <Form.Item name="systemPrompt" label="附加系统提示词" tooltip="追加在模板之后，支持 {{chat}} {{sender}} {{myNickname}} {{now}} {{#group}}...{{/group}}">
               <CodeEditor language="markdown" height={120} />
             </Form.Item>
             <Form.Item noStyle shouldUpdate={(a, b) => a.engine !== b.engine || a.harness !== b.harness}>{() => {
               if (form.getFieldValue('engine') !== 'harness') {
-                return <Form.Item name="tools" label="工具"><Select mode="multiple" options={toolOptions} /></Form.Item>;
+                return <Form.Item name="tools" label="工具" extra="标注「未启用」的需先在「工具 / MCP」页打开开关才会生效"><Select mode="multiple" options={toolOptions} /></Form.Item>;
               }
               const h = config.harnesses.find((x) => x.id === form.getFieldValue('harness'));
               const mcpUsable = h && h.type !== 'command' && h.passMcpServers;

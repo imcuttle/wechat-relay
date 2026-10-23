@@ -1,8 +1,8 @@
 import { useState, type ReactNode } from 'react';
-import { Button, Card, Form, Modal, Popconfirm, Space, Table, type FormInstance, type TableColumnsType } from 'antd';
+import { App, Button, Card, Form, Modal, Popconfirm, Space, Table, type FormInstance, type TableColumnsType } from 'antd';
 import { Pencil, Plus, Trash } from 'lucide-react';
 import type { AppConfig } from '@shared/types';
-import { useRelay } from '../relay';
+import { errMsg, useRelay } from '../relay';
 
 type ListKey = 'providers' | 'harnesses' | 'tools' | 'mcpServers' | 'prompts' | 'agents' | 'rules';
 type Item<K extends ListKey> = AppConfig[K][number];
@@ -16,6 +16,8 @@ interface Props<K extends ListKey> {
   toForm?: (item: Item<K>) => Record<string, unknown>;
   fromForm?: (values: Record<string, unknown>, prev: Item<K> | null) => Item<K>;
   extraActions?: (item: Item<K>) => ReactNode;
+  /** Runs before the item is saved (e.g. install dependencies); throwing keeps the editor open and shows the error. */
+  beforeSave?: (item: Item<K>) => Promise<void>;
   modalWidth?: number;
   /** Extra header buttons next to 新增. */
   extra?: ReactNode;
@@ -25,9 +27,11 @@ interface Props<K extends ListKey> {
 /** Table + modal editor for one array section of the config. */
 export default function ConfigList<K extends ListKey>(p: Props<K>) {
   const { config, saveConfig } = useRelay();
+  const { modal } = App.useApp();
   const [form] = Form.useForm();
   const [editing, setEditing] = useState<Item<K> | null>(null);
   const [open, setOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
   const items = (config?.[p.listKey] ?? []) as Item<K>[];
 
   const edit = (item: Item<K> | null) => {
@@ -46,6 +50,13 @@ export default function ConfigList<K extends ListKey>(p: Props<K>) {
     if ((!editing || (editing as { id: string }).id !== id) && items.some((x) => (x as { id: string }).id === id)) {
       form.setFields([{ name: 'id', errors: ['ID 已存在'] }]);
       return;
+    }
+    if (p.beforeSave) {
+      setSaving(true);
+      try { await p.beforeSave(item); } catch (e) {
+        modal.error({ title: '保存前准备失败', width: 720, content: <pre className="mono" style={{ whiteSpace: 'pre-wrap', maxHeight: 400, overflow: 'auto', fontSize: 12 }}>{errMsg(e)}</pre> });
+        return;
+      } finally { setSaving(false); }
     }
     await saveConfig((c) => {
       const list = c[p.listKey] as Item<K>[];
@@ -91,7 +102,7 @@ export default function ConfigList<K extends ListKey>(p: Props<K>) {
           },
         ]}
       />
-      <Modal open={open} title={editing ? '编辑' : '新增'} onCancel={() => setOpen(false)} onOk={() => void submit()} width={p.modalWidth ?? 640} destroyOnHidden>
+      <Modal open={open} title={editing ? '编辑' : '新增'} onCancel={() => setOpen(false)} onOk={() => void submit()} confirmLoading={saving} width={p.modalWidth ?? 640} destroyOnHidden>
         <Form form={form} layout="vertical" preserve={false}>{p.form(form, editing)}</Form>
       </Modal>
     </Card>

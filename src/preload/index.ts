@@ -22,8 +22,12 @@ const api: RelayApi = {
   approveDraft: call('approveDraft') as RelayApi['approveDraft'],
   rejectDraft: call('rejectDraft') as RelayApi['rejectDraft'],
   sendManual: call('sendManual') as RelayApi['sendManual'],
+  syncHistory: call('syncHistory') as RelayApi['syncHistory'],
+  addChat: call('addChat') as RelayApi['addChat'],
+  generateReply: call('generateReply') as RelayApi['generateReply'],
   testAgent: call('testAgent') as RelayApi['testAgent'],
   listMcpTools: call('listMcpTools') as RelayApi['listMcpTools'],
+  prepareTool: call('prepareTool') as RelayApi['prepareTool'],
   onEvent: (cb) => {
     const listener = (_: unknown, e: RelayEvent) => cb(e);
     ipcRenderer.on('relay:event', listener);

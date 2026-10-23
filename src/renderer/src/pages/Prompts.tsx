@@ -9,7 +9,7 @@ export default function Prompts() {
       <div className="page-title"><h2><FileText size={18} />提示词</h2></div>
       <Alert style={{ marginBottom: 16 }} type="info" showIcon message={
         <span>
-          模板变量：<code>{'{{chat}}'}</code> 会话名、<code>{'{{sender}}'}</code> 最新消息发送者、<code>{'{{myNickname}}'}</code> 我的昵称、<code>{'{{now}}'}</code> 当前时间；
+          模板变量：<code>{'{{chat}}'}</code> 会话名、<code>{'{{sender}}'}</code> 最新消息发送者、<code>{'{{myNickname}}'}</code> 我的昵称、<code>{'{{now}}'}</code> 今天的日期和星期（精确到秒的时间会附在最新消息前，让提示词保持不变以命中模型的提示词缓存）；
           条件块：<code>{'{{#group}}群聊时显示{{/group}}'}</code>、<code>{'{{^group}}私聊时显示{{/group}}'}</code>。模型输出 <code>[SKIP]</code> 表示不回复。
         </span>
       } />

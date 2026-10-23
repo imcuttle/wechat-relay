@@ -1,10 +1,12 @@
 import { execFileSync } from 'node:child_process';
-import { join } from 'node:path';
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, Notification, shell } from 'electron';
-import type { AppConfig, RelayEvent, TestAgentRequest, TestAgentResult } from '@shared/types';
+import { basename, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, net, Notification, protocol, shell } from 'electron';
+import type { AppConfig, RelayEvent, TestAgentRequest, TestAgentResult, ToolConfig } from '@shared/types';
 import { runAgent } from './agent/engine';
+import { prepareScriptTool } from './agent/scriptTools';
 import { mcpPool } from './agent/tools';
-import { CONFIG_PATH, configStore } from './config';
+import { CONFIG_PATH, configStore, MEDIA_DIR } from './config';
 import { Monitor } from './monitor';
 import { store } from './store';
 import { errText, logger } from './util';
@@ -89,11 +91,15 @@ function registerIpc(): void {
   handle('approveDraft', (id: string, text?: string) => monitor.approve(id, text));
   handle('rejectDraft', (id: string) => monitor.reject(id));
   handle('sendManual', (chat: string, text: string) => monitor.sendManual(chat, text));
+  handle('syncHistory', (chat: string) => monitor.syncHistory(chat));
+  handle('addChat', (chat: string) => monitor.addChat(chat));
+  handle('generateReply', (chat: string, agent?: string) => monitor.generateReply(chat, agent));
   handle('listMcpTools', async (id: string) => {
     const s = configStore.config.mcpServers.find((x) => x.id === id);
     if (!s) throw new Error('未找到 MCP server');
     return (await mcpPool.tools({ ...s, enabled: true })).map((t) => ({ name: t.name, description: t.description }));
   });
+  handle('prepareTool', (t: ToolConfig) => prepareScriptTool(t));
   handle('testAgent', async (req: TestAgentRequest): Promise<TestAgentResult> => {
     const t0 = Date.now();
     const now = Date.now();
@@ -113,7 +119,14 @@ function registerIpc(): void {
 process.on('uncaughtException', (e) => log.error(`未捕获异常：${e.stack ?? e.message}`));
 process.on('unhandledRejection', (e) => log.error(`未处理的 Promise 拒绝：${errText(e)}`));
 
+// relay-media://img/<file> serves stored image-message crops (only files directly inside MEDIA_DIR).
+protocol.registerSchemesAsPrivileged([{ scheme: 'relay-media', privileges: { standard: true, secure: true } }]);
+
 app.whenReady().then(() => {
+  protocol.handle('relay-media', (req) => {
+    const file = basename(decodeURIComponent(new URL(req.url).pathname));
+    return net.fetch(pathToFileURL(join(MEDIA_DIR, file)).toString());
+  });
   loadShellPath();
   // Packaged apps get the icon from Info.plist; in dev the Dock would show Electron's default.
   if (!app.isPackaged && process.platform === 'darwin') {
@@ -123,7 +136,18 @@ app.whenReady().then(() => {
   store.load();
   try { configStore.load(); } catch (e) { dialog.showErrorBox('配置文件错误', `${CONFIG_PATH}\n\n${errText(e)}`); }
   configStore.watch((e) => log.error(`配置重载失败：${errText(e)}`));
+  // Exact chat names used in rules get a (possibly empty) record so they show up in 会话记录 right away.
+  const syncRuleChats = (c: AppConfig) => {
+    const names = c.rules.flatMap((r) => (r.enabled === false ? [] : r.match.chats ?? []))
+      .map((n) => n.trim()).filter((n) => n && !n.includes('*') && !/^\/.*\/[a-z]*$/.test(n));
+    const known = new Set(store.summaries().map((x) => x.name));
+    const added = names.filter((n) => !known.has(n));
+    for (const n of added) store.ensure(n, c.rules.some((r) => r.match.chats?.includes(n) && r.match.chatType === 'group'));
+    if (added.length) { send({ type: 'chat', chat: added[0] }); log.info(`已根据回复规则新增会话记录：${added.join('、')}`); }
+  };
+  syncRuleChats(configStore.config);
   configStore.on('change', (c: AppConfig) => {
+    syncRuleChats(c);
     monitor.setConfig(c);
     void mcpPool.closeAll();
     send({ type: 'config', config: c });
@@ -146,7 +170,7 @@ app.whenReady().then(() => {
 
   registerIpc();
   createWindow();
-  void monitor.start();
+  void monitor.repairImages().catch((e) => log.warn(`修复图片消息失败：${errText(e)}`)).finally(() => void monitor.start());
 
   app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); });
 });

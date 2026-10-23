@@ -1,10 +1,15 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ChatMessage, ChatSummary, Draft } from '@shared/types';
 import { DATA_DIR } from './config';
+import { isNoiseText } from './util';
 
 const FILE = join(DATA_DIR, 'state.json');
 const MAX_PER_CHAT = 300;
+
+export function dropImages(msgs: ChatMessage[]): void {
+  for (const m of msgs) if (m.image) rmSync(m.image, { force: true });
+}
 
 interface ChatState { isGroup: boolean; paused: boolean; messages: ChatMessage[]; lastReplyAt?: Record<string, number> }
 interface State { chats: Record<string, ChatState>; drafts: Draft[] }
@@ -18,8 +23,16 @@ class Store {
   load(): void {
     if (existsSync(FILE)) {
       try { this.s = { chats: {}, drafts: [], ...JSON.parse(readFileSync(FILE, 'utf8')) }; } catch { /* corrupt: start fresh */ }
+      // Drop UI overlays ("3条新消息") that earlier versions recorded as messages.
+      for (const c of Object.values(this.s.chats)) {
+        const bad = c.messages.filter((m) => m.kind !== 'image' && isNoiseText(m.text));
+        if (bad.length) c.messages = c.messages.filter((m) => !bad.includes(m));
+      }
     }
   }
+
+  /** Persists in-place edits of returned messages. */
+  touch(): void { this.save(); }
 
   private save(): void {
     clearTimeout(this.timer);
@@ -33,8 +46,10 @@ class Store {
   chat(name: string): ChatState | undefined { return this.s.chats[name]; }
 
   ensure(name: string, isGroup: boolean): ChatState {
+    const isNew = !this.s.chats[name];
     const c = (this.s.chats[name] ??= { isGroup, paused: false, messages: [] });
     if (isGroup) c.isGroup = true;
+    if (isNew) this.save();
     return c;
   }
 
@@ -42,8 +57,23 @@ class Store {
     const c = this.s.chats[name];
     if (!c || !msgs.length) return;
     c.messages.push(...msgs);
-    if (c.messages.length > MAX_PER_CHAT) c.messages.splice(0, c.messages.length - MAX_PER_CHAT);
+    this.trim(c);
     this.save();
+  }
+
+  /** Replaces a chat's history (after reading older messages by scrolling up). */
+  replace(name: string, msgs: ChatMessage[]): void {
+    const c = this.s.chats[name];
+    if (!c) return;
+    const keep = new Set(msgs.map((m) => m.image).filter(Boolean));
+    dropImages(c.messages.filter((m) => m.image && !keep.has(m.image)));
+    c.messages = msgs;
+    this.trim(c);
+    this.save();
+  }
+
+  private trim(c: ChatState): void {
+    if (c.messages.length > MAX_PER_CHAT) dropImages(c.messages.splice(0, c.messages.length - MAX_PER_CHAT));
   }
 
   history(name: string): ChatMessage[] { return this.s.chats[name]?.messages ?? []; }
@@ -52,13 +82,13 @@ class Store {
     return Object.entries(this.s.chats)
       .map(([name, c]) => {
         const last = c.messages[c.messages.length - 1];
-        return { name, isGroup: c.isGroup, paused: c.paused, count: c.messages.length, lastAt: last?.at ?? 0, lastText: last?.text ?? '' };
+        return { name, isGroup: c.isGroup, paused: c.paused, count: c.messages.length, lastAt: last?.at ?? 0, lastText: last?.image ? '[图片]' : last?.text ?? '' };
       })
       .sort((a, b) => b.lastAt - a.lastAt);
   }
 
   setPaused(name: string, paused: boolean): void { this.ensure(name, false).paused = paused; this.save(); }
-  clear(name: string): void { delete this.s.chats[name]; this.save(); }
+  clear(name: string): void { dropImages(this.s.chats[name]?.messages ?? []); delete this.s.chats[name]; this.save(); }
 
   lastReply(name: string, rule: string): number { return this.s.chats[name]?.lastReplyAt?.[rule] ?? 0; }
   markReply(name: string, rule: string): void {

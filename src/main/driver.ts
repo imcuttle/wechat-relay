@@ -12,6 +12,7 @@ const log = logger.scope('driver');
 export function resolveDriver(cfg: DriverConfig): { command: string; args: string[] } | null {
   if (cfg.command && cfg.command !== 'auto') return { command: cfg.command, args: cfg.args ?? [] };
   const candidates = [
+    '/Applications/CodeBuddy Desktop.app/Contents/Resources/native/cua-driver/bin/cua-driver-mcp',
     '/Applications/CodeBuddy Desktop.app/Contents/Resources/plugins/cua-driver/bin/cua-driver-mcp',
     '/Applications/CodeBuddy.app/Contents/Resources/plugins/cua-driver/bin/cua-driver-mcp',
     '/Applications/WorkBuddy.app/Contents/Resources/plugins/cua-driver/bin/cua-driver-mcp',

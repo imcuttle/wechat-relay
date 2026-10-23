@@ -4,11 +4,18 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import YAML from 'yaml';
 import type { AppConfig } from '@shared/types';
+import { BUILTIN_TOOLS } from '@shared/builtins';
 
 export const DATA_DIR = process.env.WECHAT_RELAY_HOME || join(homedir(), '.wechat-relay');
 export const CONFIG_PATH = join(DATA_DIR, 'config.yaml');
+/** Script tools: one npm package per tool (package.json + index.ts + node_modules). */
+export const TOOLS_DIR = join(DATA_DIR, 'tools');
+/** Default cwd / base of relative paths for the file and shell built-in tools. */
+export const WORKSPACE_DIR = join(DATA_DIR, 'workspace');
 /** Screenshots are rewritten every poll; keep them out of the data dir. */
 export const CACHE_DIR = process.env.WECHAT_RELAY_HOME ? join(DATA_DIR, 'cache') : join(homedir(), 'Library', 'Caches', 'wechat-relay');
+/** Compressed crops of image messages, referenced by stored chat history. */
+export const MEDIA_DIR = join(DATA_DIR, 'media');
 
 const DEFAULT_YAML = `# WeChat Relay 配置（保存后自动热加载，也可在应用界面中编辑）
 # 字符串中的 \${ENV_NAME} 会在使用时替换为环境变量。
@@ -21,14 +28,16 @@ general:
   replyDelayMs: [1500, 4000]
   openUnreadChats: true     # 自动点开有未读红点且命中回复规则的会话
   restoreChat: false
-  restoreClipboard: true
+  restoreClipboard: true    # 前台发送用剪贴板粘贴，发送后恢复原剪贴板内容
   maxRepliesPerMinute: 6
-  historyLimit: 30
+  historyLimit: 30          # 给智能体的上下文最多条数（超出时一次丢弃较早的一半，之后只追加，保持提示词缓存命中）
+  historyMinutes: 10        # 上下文最早消息的时间上限（同样批量丢弃）；会话首次出现时会在后台向上滚动读取（0 = 不限时间，也不滚动读取）
+  imageMaxSize: 768         # 聊天图片裁剪后压缩到的最长边（像素）
 
 driver:
   command: auto             # auto = 使用 CodeBuddy 内置的 cua-driver
   args: []
-  deliveryMode: background
+  deliveryMode: background  # foreground = 先后台发送，失败或需要搜索时才等你空闲 3 秒，把微信短暂切到前台用快捷键发送，再切回原应用
 
 providers:
   - id: deepseek
@@ -86,7 +95,7 @@ prompts:
     name: 默认人设
     content: |
       你正在以「{{myNickname}}」的身份在微信里和「{{chat}}」聊天{{#group}}（这是一个群聊，最新消息来自 {{sender}}）{{/group}}。
-      当前时间：{{now}}。
+      今天是 {{now}}，当前时间见最新消息开头。
       要求：
       - 像真人一样简短、口语化地回复，一般不超过两句话，不要使用 Markdown。
       - 不确定或涉及金钱、承诺、隐私的事情，礼貌地表示稍后本人回复。
@@ -103,6 +112,9 @@ agents:
     systemPrompt: ""
     tools: [builtin:time, builtin:history, builtin:skip, weather]
     maxToolRounds: 4
+    vision: false           # 模型支持图片（如 deepseek-flash、gpt-4o）时打开：聊天图片直接作为图片发给模型，否则用 OCR 文字兜底
+    maxImages: 4
+    imageDetail: low
   - id: codebuddy-agent
     name: CodeBuddy 代理
     engine: harness
@@ -147,10 +159,14 @@ function normalize(raw: Partial<AppConfig> | null | undefined): AppConfig {
     driver: { ...DEFAULTS.driver, ...(c.driver ?? {}) },
     providers: withDefaults(arr(c.providers), { type: 'openai', apiKey: '' }),
     harnesses: withDefaults(arr(c.harnesses), { args: [], timeoutMs: 180000, sessionPerChat: true, passMcpServers: true }),
-    tools: withDefaults(arr(c.tools), { parameters: { type: 'object', properties: {} }, timeoutMs: 15000 }),
+    builtinTools: {
+      ...Object.fromEntries(BUILTIN_TOOLS.map((b) => [b.id, b.defaultEnabled])),
+      ...(c.builtinTools && typeof c.builtinTools === 'object' ? c.builtinTools : {}),
+    },
+    tools: withDefaults(arr(c.tools), { type: 'command', enabled: true, parameters: { type: 'object', properties: {} }, timeoutMs: 15000 }),
     mcpServers: withDefaults(arr(c.mcpServers), { enabled: true }),
     prompts: withDefaults(arr(c.prompts), { content: '' }),
-    agents: withDefaults(arr(c.agents), { engine: 'model', tools: [], maxToolRounds: 4 }),
+    agents: withDefaults(arr(c.agents), { engine: 'model', tools: [], maxToolRounds: 4, vision: false, maxImages: 4, imageDetail: 'low' }),
     rules: withDefaults(arr(c.rules), { enabled: true, action: 'reply', cooldownSec: 0, mode: 'inherit' }).map((r) => ({ ...r, match: r.match ?? {} })),
   };
 }

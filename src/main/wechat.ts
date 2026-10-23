@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { VisionResult } from '@shared/types';
@@ -14,6 +15,12 @@ export interface Frame { path: string; scale: number; width: number; height: num
 
 /** Thrown when an action would (or did) disturb the user: WeChat pulled to the front, wrong chat, etc. Stops automation. */
 export class SafetyStop extends Error {}
+
+/** The chat is not in the session list (opening it needs a search, which only works in the foreground). */
+export class NotInListError extends Error {}
+
+/** Background typing left the input box empty (WeChat ignored the events); nothing to clean up. */
+export class NotLandedError extends Error {}
 
 /** Normalises OCR'd text for fuzzy comparison (WeChat truncates long names with "..."). */
 export function normText(s: string): string {
@@ -46,18 +53,54 @@ export function sameChat(a: string | null | undefined, b: string | null | undefi
   return (short.length >= 4 && long.startsWith(short)) || similarity(x, y) >= 0.85;
 }
 
+export interface WeChatOptions { foreground: boolean; restoreClipboard: boolean }
+
+/** Seconds since the last real keyboard / mouse input (IOHIDSystem HIDIdleTime). Driver-posted events reset it too. */
+async function userIdleSeconds(): Promise<number> {
+  const out = await new Promise<string>((resolve, reject) =>
+    execFile('/usr/sbin/ioreg', ['-c', 'IOHIDSystem', '-d', '4'], { maxBuffer: 4 << 20 }, (e, so) => (e ? reject(e) : resolve(so))));
+  const ns = Number(/"HIDIdleTime" = (\d+)/.exec(out)?.[1] ?? 0);
+  return ns / 1e9;
+}
+
+/** Pid of the frontmost app per LaunchServices (the driver's list_apps `active` flag can be stale). */
+async function frontmostPid(): Promise<number> {
+  const out = await new Promise<string>((resolve, reject) =>
+    execFile('/bin/sh', ['-c', 'lsappinfo info -only pid "$(lsappinfo front)"'], (e, so) => (e ? reject(e) : resolve(so))));
+  return Number(/"pid"\s*=\s*(\d+)/.exec(out)?.[1] ?? 0);
+}
+
+/** Re-activates the app `pid` (works for apps with several windows, unlike the driver's pid-only bring_to_front). */
+async function activatePid(pid: number): Promise<void> {
+  const out = await new Promise<string>((resolve, reject) =>
+    execFile('/usr/bin/lsappinfo', ['info', '-only', 'bundlepath', '-app', String(pid)], (e, so) => (e ? reject(e) : resolve(so))));
+  const path = /="(.+)"/.exec(out)?.[1];
+  if (!path) throw new Error(`找不到 pid ${pid} 对应的应用`);
+  await new Promise<void>((resolve, reject) => execFile('/usr/bin/open', ['-a', path], (e) => (e ? reject(e) : resolve())));
+}
+
+const IDLE_BEFORE_FOREGROUND_SEC = 3;
+const IDLE_WAIT_MAX_MS = 30000;
+
 /**
- * Drives the WeChat main window strictly in the background through the Cua Driver.
+ * Drives the WeChat main window through the Cua Driver.
  *
- * Rules (learned the hard way): no keyboard combos (they front WeChat), no clipboard, no global search. Only pixel clicks,
- * `type_text` and single keys posted to the WeChat process, and every send is verified (chat title + input box OCR)
- * before Return is pressed. If WeChat ever becomes frontmost because of an action, a SafetyStop is raised.
+ * Background mode (default): no keyboard combos (they front WeChat), no clipboard. Only pixel clicks, `type_text` and
+ * single keys posted to the WeChat process; if WeChat ever becomes frontmost because of an action, a SafetyStop is raised.
+ * Note: WeChat 4.x ignores background focus clicks, so background typing does not land (see foreground mode).
+ *
+ * Foreground mode (`driver.deliveryMode: foreground`, opt-in): only for sending. Waits until the user is idle, brings
+ * WeChat to the front once, pastes via the clipboard (restored afterwards) and switches back to the previous app.
+ *
+ * Every send is verified (chat title + input box OCR) before Return is pressed.
  */
 export class WeChat {
   win: WindowRef | null = null;
   private frameDir = join(CACHE_DIR, 'frames');
   private frameSeq = 0;
-  constructor(private driver: CuaDriver, private vision: Vision) {
+  /** True while a foreground send owns WeChat (it is frontmost on purpose). */
+  private fg = false;
+  constructor(private driver: CuaDriver, private vision: Vision, private opts: () => WeChatOptions = () => ({ foreground: false, restoreClipboard: true })) {
     mkdirSync(this.frameDir, { recursive: true });
   }
 
@@ -73,11 +116,14 @@ export class WeChat {
   async locate(): Promise<WindowRef | null> {
     const app = (await this.apps()).find((a) => a.running && a.bundle_id && BUNDLE_IDS.includes(a.bundle_id));
     if (!app) { this.win = null; return null; }
-    const wins = structured<{ windows?: Array<{ window_id: number; is_on_screen?: boolean; bounds: { width: number; height: number } }> }>(
+    const wins = structured<{ windows?: Array<{ window_id: number; title?: string; is_on_screen?: boolean; bounds: { width: number; height: number } }> }>(
       await this.driver.call('list_windows', { pid: app.pid })).windows ?? [];
+    // The main window is titled 微信 / WeChat; detached chat windows ("微信 (窗口)" etc.) must not be picked.
+    const isMain = (t?: string) => ['微信', 'WeChat', 'Weixin'].includes((t ?? '').trim());
     const main = wins
       .filter((w) => w.bounds.width >= 500 && w.bounds.height >= 400)
-      .sort((a, b) => Number(b.is_on_screen) - Number(a.is_on_screen) || b.bounds.width * b.bounds.height - a.bounds.width * a.bounds.height)[0];
+      .sort((a, b) => Number(isMain(b.title)) - Number(isMain(a.title)) || Number(b.is_on_screen) - Number(a.is_on_screen) ||
+        b.bounds.width * b.bounds.height - a.bounds.width * a.bounds.height)[0];
     this.win = main ? { pid: app.pid, windowId: main.window_id, width: main.bounds.width, height: main.bounds.height } : null;
     return this.win;
   }
@@ -92,7 +138,7 @@ export class WeChat {
   /** Whether WeChat is the frontmost app (i.e. the user is probably using it). */
   async isFrontmost(): Promise<boolean> {
     const w = await this.target();
-    return (await this.apps()).find((a) => a.pid === w.pid)?.active === true;
+    return (await frontmostPid()) === w.pid;
   }
 
   /** Screenshot of the main window (works while covered by other windows, not while minimised). */
@@ -123,12 +169,88 @@ export class WeChat {
     return { path, scale, width, height, vision, at: Date.now() };
   }
 
-  /** Posts one input action to WeChat and raises SafetyStop if it pulled WeChat to the front. */
-  private async act(tool: 'click' | 'type_text' | 'press_key' | 'scroll', args: Record<string, unknown>): Promise<void> {
+  /**
+   * Posts one input action to WeChat. Background mode: raises SafetyStop if it pulled WeChat to the front.
+   * Foreground mode: WeChat is frontmost on purpose; aborts if the user switched away meanwhile.
+   */
+  private async act(tool: 'click' | 'type_text' | 'press_key' | 'scroll' | 'hotkey', args: Record<string, unknown>): Promise<void> {
     const w = await this.target();
+    if (this.fg) {
+      // WeChat is frontmost on purpose, so events posted to its pid are handled like real input. With several WeChat
+      // windows open the driver refuses pid-scoped keys (same_pid_keyboard_ambiguity): retry targeting the window.
+      if (!(await this.isFrontmost())) throw new SafetyStop('发送过程中微信不在前台了（可能你切换了应用），已中止');
+      const a = { pid: w.pid, window_id: w.windowId, ...args };
+      const post = async (mode: string) => {
+        try {
+          await this.driver.call(tool, { ...a, delivery_mode: mode });
+        } catch (e) {
+          // Pixel actions need a screenshot snapshot owned by this session; refresh it once (e.g. after activation).
+          if (!/No current snapshot|screenshot_context_missing/i.test(errText(e))) throw e;
+          await this.capture();
+          await this.driver.call(tool, { ...a, delivery_mode: mode });
+        }
+      };
+      try {
+        await post('background');
+      } catch (e) {
+        if (!/same_pid_keyboard_ambiguity/.test(errText(e))) throw e;
+        await post('foreground');
+      }
+      return;
+    }
     if (await this.isFrontmost()) throw new SafetyStop('微信正在前台使用中，暂不操作');
-    await this.driver.call(tool, { pid: w.pid, window_id: w.windowId, delivery_mode: 'background', ...args });
+    const bg = { pid: w.pid, window_id: w.windowId, delivery_mode: 'background', ...args };
+    try {
+      await this.driver.call(tool, bg);
+    } catch (e) {
+      if (!/No current snapshot|screenshot_context_missing/i.test(errText(e))) throw e;
+      await this.capture();
+      await this.driver.call(tool, bg);
+    }
     if (await this.isFrontmost()) throw new SafetyStop(`${tool} 导致微信被切到前台，已停止自动操作`);
+  }
+
+  /**
+   * Runs `fn` with WeChat briefly in front: waits for the user to be idle, saves the clipboard and the frontmost app,
+   * fronts WeChat once, then restores the clipboard and switches back (only if WeChat is still the frontmost app).
+   */
+  private async withForeground<T>(fn: () => Promise<T>): Promise<T> {
+    const w = await this.target();
+    const t0 = Date.now();
+    while ((await userIdleSeconds()) < IDLE_BEFORE_FOREGROUND_SEC) {
+      if (Date.now() - t0 > IDLE_WAIT_MAX_MS) throw new Error('你一直在操作电脑，为避免打扰暂不切换微信发送');
+      await sleep(1000);
+    }
+    const front = await frontmostPid();
+    if (front === w.pid) throw new Error('微信正在前台使用中，暂不操作');
+    const restoreClip = this.opts().restoreClipboard;
+    if (restoreClip) await this.vision.clipboard('save');
+    try {
+      await this.driver.call('bring_to_front', { pid: w.pid, window_id: w.windowId });
+      await sleep(150);
+      this.fg = true;
+      return await fn();
+    } finally {
+      this.fg = false;
+      if (restoreClip) {
+        const r = await this.vision.clipboard('restore').catch((e) => ({ ok: false, error: errText(e), restored: false }));
+        if (!r.ok) log.warn(`恢复剪贴板失败：${r.error}`);
+        else if (!r.restored) log.info('剪贴板在发送期间被其他内容覆盖，保留新内容');
+      }
+      if (front && (await this.isFrontmost().catch(() => false))) {
+        await activatePid(front).catch((e) => log.warn(`切回之前的应用失败：${errText(e)}`));
+      }
+    }
+  }
+
+  /**
+   * Foreground only: focuses the field at (x, y) with a driver click (posted to WeChat, the real pointer does not move)
+   * and pastes `value` via the clipboard.
+   */
+  private async pasteAt(x: number, y: number, value: string): Promise<void> {
+    await this.act('click', { x, y });
+    await this.vision.clipboard('set', value);
+    await this.act('hotkey', { keys: ['cmd', 'v'] });
   }
 
   /**
@@ -155,12 +277,98 @@ export class WeChat {
     return null;
   }
 
-  /** Clicks a session row (scrolling the list if needed) and waits until the chat header shows it. Never uses search. */
+  /**
+   * Background: focuses the field at (x, y) with a driver click, then posts the text to WeChat. (The driver's
+   * one-call px form of type_text is skipped: its focus click is always refused by WeChat 4.x.)
+   */
+  private async typeAt(x: number, y: number, value: string): Promise<void> {
+    const chunks = value.match(/[\s\S]{1,40}/gu) ?? [];
+    if (!chunks.length) return;
+    await this.act('click', { x, y });
+    await sleep(200);
+    for (const c of chunks) await this.act('type_text', { text: c });
+  }
+
+  /**
+   * Foreground only, keyboard only: Cmd+F, types `name`, reads WeChat's search popup (a separate window), moves the
+   * highlight with Down onto the matching contact / group row and presses Return. The search box has focus, so Return
+   * never reaches the chat input. Returns the frame once the chat header shows `name`.
+   */
+  private async searchChatFg(name: string): Promise<Frame> {
+    const w = await this.target();
+    const want = normText(name);
+    await this.act('hotkey', { keys: ['cmd', 'f'] });
+    await sleep(300);
+    await this.act('type_text', { text: name, delay_ms: 40 });
+    try {
+      let popup: { id: number; path: string; scale: number; lines: Frame['vision']['lines'] } | null = null;
+      let hit: Frame['vision']['lines'][number] | undefined;
+      for (let i = 0; i < 4 && !hit; i++) {
+        await sleep(i ? 500 : 900);
+        const wins = (await this.vision.windows(w.pid)).filter((x) => x.id !== w.windowId && x.layer > 0 && x.layer < 20 && x.w >= 200 && x.h >= 150);
+        for (const pw of wins) {
+          popup = await this.captureWindow(pw.id);
+          const lines = popup.lines;
+          // Contact / group rows sit under a section header; the rows above it are 搜一搜 suggestions.
+          const header = lines.find((x) => /^(联系人|群聊|功能|最常使用|Contacts|Group Chats|Top Hits)$/.test(x.text.trim()));
+          const end = lines.find((x) => header && x.y > header.y && /^(聊天记录|Chat History|公众号|小程序|搜一搜)$/.test(x.text.trim()));
+          const rows = header ? lines.filter((x) => x.y > header.y && (!end || x.y < end.y)) : [];
+          hit = rows.find((x) => normText(x.text) === want) ?? rows.find((x) => sameChat(x.text, name));
+          if (hit) break;
+        }
+      }
+      if (!popup || !hit) throw new Error(`搜索「${name}」没有找到联系人或群聊`);
+      const target = hit.y + hit.h / 2;
+      const rowYs = popup.lines.filter((x) => x.x < popup!.lines.reduce((m, l) => Math.min(m, l.x), 1e9) + 120 * popup!.scale && !/^(联系人|群聊|功能|最常使用|聊天记录)$/.test(x.text.trim()))
+        .map((x) => x.y + x.h / 2);
+      const stripX = Math.max(0, Math.round(popup.lines.reduce((m, l) => Math.min(m, l.x), 1e9) - 20 * popup.scale / 2));
+      for (let k = 0; k <= 15; k++) {
+        if (k) { await this.act('press_key', { key: 'down' }); await sleep(150); popup = { ...popup, ...(await this.captureWindow(popup.id, false)) }; }
+        const lum = await this.vision.luma(popup.path, stripX, rowYs);
+        const max = Math.max(...lum);
+        if (max - Math.min(...lum) < 6) continue; // nothing highlighted yet
+        const at = rowYs[lum.indexOf(max)];
+        if (Math.abs(at - target) < hit.h) {
+          await this.act('press_key', { key: 'return' });
+          for (let i = 0; i < 6; i++) {
+            await sleep(300);
+            const f = await this.capture();
+            if (sameChat(f.vision.title, name)) return f;
+          }
+          throw new Error(`搜索后未能打开「${name}」`);
+        }
+        if (at > target + hit.h) break; // overshot
+      }
+      throw new Error(`搜索结果中无法选中「${name}」`);
+    } catch (e) {
+      await this.act('press_key', { key: 'escape' }).catch(() => undefined);
+      throw e;
+    }
+  }
+
+  /** Screenshot + OCR of another WeChat window (e.g. the search popup). */
+  private async captureWindow(windowId: number, ocr = true): Promise<{ id: number; path: string; scale: number; lines: Frame['vision']['lines'] }> {
+    const w = await this.target();
+    const res = await this.driver.call('get_window_state', { pid: w.pid, window_id: windowId, include_accessibility_tree: false, include_screenshot: true, max_image_dimension: 4000 }, 15000);
+    const st = structured<{ screenshot_width?: number; window_bounds?: { width: number } }>(res);
+    const image = res.content?.find((b) => b.type === 'image' && b.data)?.data;
+    if (!image) throw new Error('无法截取微信搜索结果');
+    const path = join(this.frameDir, 'popup.png');
+    writeFileSync(path, Buffer.from(image, 'base64'));
+    const scale = st.window_bounds?.width && st.screenshot_width ? st.screenshot_width / st.window_bounds.width : 2;
+    const lines = ocr ? (await this.vision.parse(path, scale)).lines ?? [] : [];
+    return { id: windowId, path, scale, lines: lines.sort((a, b) => a.y - b.y) };
+  }
+
+  /**
+   * Opens a chat in the background: clicks its row (scrolling the session list if needed) and waits until the chat
+   * header shows it. Throws NotInListError when the chat is not in the session list (search needs the foreground).
+   */
   async openChat(name: string, frame?: Frame): Promise<Frame> {
     let f = frame ?? (await this.capture());
     if (sameChat(f.vision.title, name)) return f;
     const found = await this.findSession(name, f);
-    if (!found) throw new Error(`会话列表中找不到「${name}」，已跳过（可在微信中先打开一次该会话）`);
+    if (!found) throw new NotInListError(`会话列表中找不到「${name}」`);
     f = found.f;
     const row = found.row;
     await this.act('click', { x: Math.round(row.x), y: Math.round(row.y) });
@@ -170,6 +378,13 @@ export class WeChat {
       if (sameChat(f.vision.title, name)) return f;
     }
     throw new Error(`点击后未能切换到「${name}」（当前：${f.vision.title ?? '无'}）`);
+  }
+
+  /** Scrolls the message area with wheel events (background, no focus change). */
+  async scrollChat(f: Frame, direction: 'up' | 'down', amount: number): Promise<void> {
+    const l = f.vision.layout;
+    if (!l) throw new Error('未识别到聊天区域');
+    await this.act('scroll', { x: Math.round((l.chatLeft + l.chatRight) / 2), y: Math.round((l.headerBottom + l.inputTop) / 2), direction, amount, by: 'line' });
   }
 
   /** OCR text currently inside the input box. */
@@ -185,32 +400,80 @@ export class WeChat {
   }
 
   private async clearInput(chars: number): Promise<void> {
+    if (this.fg) {
+      await this.act('hotkey', { keys: ['cmd', 'a'] });
+      await this.act('press_key', { key: 'delete' });
+      return;
+    }
     for (let i = 0; i < Math.min(chars + 4, 400); i++) await this.act('press_key', { key: 'delete' });
   }
 
   /**
-   * Types `value` into the chat named `chat` and presses Return, only after verifying that
+   * Enters `value` into the chat named `chat` and presses Return, only after verifying that
    * (1) the open chat is `chat`, (2) the input box was empty, and (3) the input box now contains `value`.
+   *
+   * Foreground mode: the chat is opened in the background when it is in the session list; only the steps that
+   * cannot be done in the background (search, entering the text, Return) run inside one short foreground window.
+   * Returns the screen captured right after sending.
    */
-  async sendText(chat: string, value: string): Promise<void> {
+  async sendText(chat: string, value: string): Promise<Frame | undefined> {
     const msg = value.replace(/\s*\n+\s*/g, ' ').trim();
     if (!msg) return;
-    let f = await this.openChat(chat);
-    const l = f.vision.layout;
+    const fgAllowed = this.opts().foreground;
+    let opened: Frame | null = null;
+    try {
+      opened = await this.openChat(chat);
+    } catch (e) {
+      if (!(e instanceof NotInListError)) throw e;
+      if (!fgAllowed) throw new Error(`${e.message}，已跳过（开启「前台快速发送」后可通过搜索打开）`);
+      log.info(`${e.message}，将在前台通过搜索打开`);
+    }
+    let leftover = false;
+    if (opened) {
+      try {
+        return await this.sendInner(opened, chat, msg);
+      } catch (e) {
+        if (!(e instanceof NotLandedError) || !fgAllowed) throw e;
+        log.info('后台输入没有生效，改为前台快速发送');
+        leftover = true; // keystrokes may still have landed unseen: clear our own text before pasting
+      }
+    }
+    return this.withForeground(async () => this.sendInner(opened ?? (await this.searchChatFg(chat)), chat, msg, leftover));
+  }
+
+  /** `clearOwn`: the input box was verified empty before our own background attempt, so anything in it now is ours. */
+  private async sendInner(opened: Frame, chat: string, msg: string, clearOwn = false): Promise<Frame> {
+    let f = this.fg ? await this.capture() : opened;
+    if (!sameChat(f.vision.title, chat)) throw new Error(`当前会话不是「${chat}」（${f.vision.title ?? '无'}），未发送`);
+    let l = f.vision.layout;
     if (!l?.input || !l.send) throw new Error('未识别到输入框 / 发送按钮');
+    if (clearOwn && this.fg) {
+      await this.act('click', { x: Math.round(l.input.x), y: Math.round(l.input.y) });
+      await this.clearInput(0);
+      await sleep(200);
+      f = await this.capture();
+      l = f.vision.layout;
+      if (!l?.input || !l.send) throw new Error('未识别到输入框 / 发送按钮');
+    }
     const before = this.inputText(f);
     if (before) throw new Error(`输入框里已有未发送的内容「${before.slice(0, 20)}」，为避免误发已跳过`);
 
-    const at = { x: Math.round(l.input.x), y: Math.round(l.input.y) };
-    const chunks = msg.match(/[\s\S]{1,40}/gu) ?? [];
-    for (let i = 0; i < chunks.length; i++) await this.act('type_text', i === 0 ? { text: chunks[i], ...at } : { text: chunks[i] });
+    const x = Math.round(l.input.x), y = Math.round(l.input.y);
+    if (this.fg) await this.pasteAt(x, y, msg);
+    else await this.typeAt(x, y, msg);
     await sleep(250);
 
     f = await this.capture();
-    const typed = this.inputText(f);
+    let typed = this.inputText(f);
+    for (let i = 0; i < 2 && similarity(typed, msg) < 0.6 && sameChat(f.vision.title, chat); i++) {
+      await sleep(400); // long texts may still be rendering
+      f = await this.capture();
+      typed = this.inputText(f);
+    }
     if (!sameChat(f.vision.title, chat)) {
       throw new SafetyStop(`输入过程中会话变成了「${f.vision.title ?? '无'}」，未发送（输入框可能残留文字，请检查）`);
     }
+    if (!typed && !this.fg) throw new NotLandedError('后台输入没有生效（输入框仍为空），未发送');
     const score = similarity(typed, msg);
     if (score < 0.6) {
       await this.clearInput(msg.length);
@@ -220,6 +483,7 @@ export class WeChat {
     await sleep(500);
     f = await this.capture();
     if (this.inputText(f)) log.warn(`发送后输入框仍有内容：「${this.inputText(f).slice(0, 30)}」`);
+    return f;
   }
 
   describeError(e: unknown): string {

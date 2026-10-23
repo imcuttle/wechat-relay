@@ -42,3 +42,16 @@ export const nowText = (): string => {
   const d = new Date();
   return `${d.toLocaleString('zh-CN', { hour12: false })} ${d.toLocaleDateString('zh-CN', { weekday: 'long' })}`;
 };
+
+/** Date + weekday only (stable for a whole day, used where text must not change between calls). */
+export const dateText = (): string => {
+  const d = new Date();
+  return `${d.toLocaleDateString('zh-CN')} ${d.toLocaleDateString('zh-CN', { weekday: 'long' })}`;
+};
+
+/** WeChat UI overlays that are not messages ("3条新消息" pill, "以下为新消息" divider, jump-to-bottom hints). */
+export const isNoiseText = (t: string): boolean => {
+  const s = t.replace(/[\s↓⬇⬆↑>〉›]/g, '');
+  return /^(有)?\d+条(新|未读)?消息$/.test(s) || /^\d+条@?我?的?消息$/.test(s) ||
+    ['以下为新消息', '以下是新消息', '回到最新', '回到底部', '查看最新消息'].includes(s);
+};

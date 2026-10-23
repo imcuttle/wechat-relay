@@ -19,8 +19,15 @@ export interface GeneralConfig {
   restoreChat: boolean;
   restoreClipboard: boolean;
   maxRepliesPerMinute: number;
-  /** How many history messages are given to the agent. */
+  /** How many history messages are given to the agent (upper bound). */
   historyLimit: number;
+  /**
+   * Give the agent the messages of the last N minutes. When a chat is seen without known history, the bot scrolls the
+   * chat up (in the background) before replying to read them. 0 = only what was seen on screen.
+   */
+  historyMinutes: number;
+  /** Image messages are cropped from the screenshot and saved as JPEG with this longest side (px). */
+  imageMaxSize: number;
 }
 
 export interface DriverConfig {
@@ -59,11 +66,18 @@ export interface HarnessConfig {
 
 export interface ToolConfig {
   id: string;
+  /** command = shell command; script = TypeScript module (`export default async (args, ctx) => result`). */
+  type: 'command' | 'script';
+  enabled: boolean;
   description: string;
   /** JSON Schema of the arguments. */
   parameters: Record<string, unknown>;
-  /** Shell command; {{arg}} placeholders are replaced with shell-quoted values. Args are also in $TOOL_ARGS (JSON). */
-  command: string;
+  /** type=command. Shell command; {{arg}} placeholders are replaced with shell-quoted values. Args are also in $TOOL_ARGS (JSON). */
+  command?: string;
+  /** type=script. TypeScript source (types are stripped, so no enums / namespaces). */
+  code?: string;
+  /** type=script. npm dependencies (package.json format, pin versions), installed when the tool is saved. */
+  dependencies?: Record<string, string>;
   cwd?: string;
   timeoutMs: number;
 }
@@ -98,9 +112,15 @@ export interface AgentConfig {
   /** Prompt id from `prompts`; `systemPrompt` is appended after it. */
   prompt?: string;
   systemPrompt?: string;
-  /** builtin:time, builtin:history, builtin:skip, <tool id>, mcp:<server id> */
+  /** builtin:<name>, <tool id>, mcp:<server id>. Only used when the tool / server is also enabled globally. */
   tools: string[];
   maxToolRounds: number;
+  /** The model accepts images: chat images are sent as image parts instead of their OCR text. */
+  vision?: boolean;
+  /** At most this many (most recent) images per request; older ones fall back to text. */
+  maxImages?: number;
+  /** OpenAI-style image detail (low = cheapest). */
+  imageDetail?: 'low' | 'high' | 'auto';
 }
 
 export interface RuleMatch {
@@ -134,6 +154,8 @@ export interface AppConfig {
   driver: DriverConfig;
   providers: ProviderConfig[];
   harnesses: HarnessConfig[];
+  /** builtin:<name> → enabled (see shared/builtins.ts for defaults). */
+  builtinTools: Record<string, boolean>;
   tools: ToolConfig[];
   mcpServers: McpServerConfig[];
   prompts: PromptConfig[];
@@ -152,8 +174,10 @@ export interface VisionMessage {
   side: 'self' | 'other' | 'system';
   sender?: string | null;
   text: string;
-  kind: 'text' | 'media' | 'time' | 'system';
+  kind: 'text' | 'image' | 'media' | 'time' | 'system';
   top: number; bottom: number; partial: boolean;
+  /** Bubble / image bounds in screenshot pixels. */
+  box?: { x: number; y: number; w: number; h: number } | null;
 }
 export interface VisionLayout {
   sidebarRight: number; listLeft: number; listRight: number; chatLeft: number; chatRight: number;
@@ -175,10 +199,17 @@ export interface ChatMessage {
   id: string;
   side: 'self' | 'other';
   sender?: string;
+  /** For images: "[图片]" plus any OCR'd text inside the image (the fallback for text-only models). */
   text: string;
+  /** Best-effort send time (from WeChat's time separators), else when it was first seen. */
   at: number;
   /** ocr = seen on screen; bot = sent by this app */
   source: 'ocr' | 'bot';
+  kind?: 'text' | 'image';
+  /** Compressed JPEG crop of an image message. */
+  image?: string;
+  /** The crop was validated (not blank / not a mis-detected text bubble). */
+  checked?: boolean;
 }
 
 export interface ChatSummary {
@@ -250,7 +281,7 @@ export type RelayEvent =
   | { type: 'status'; status: MonitorStatus }
   | { type: 'log'; entry: LogEntry }
   | { type: 'snapshot'; snapshot: Snapshot }
-  | { type: 'chat'; chat: string; message: ChatMessage }
+  | { type: 'chat'; chat: string; message?: ChatMessage }
   | { type: 'draft'; draft: Draft }
   | { type: 'config'; config: AppConfig };
 
@@ -273,7 +304,14 @@ export interface RelayApi {
   approveDraft(id: string, text?: string): Promise<void>;
   rejectDraft(id: string): Promise<void>;
   sendManual(chat: string, text: string): Promise<void>;
+  /** Adds a chat to the records and, when it is in WeChat's session list, reads its visible messages. */
+  syncHistory(chat: string): Promise<{ count: number; scrolls: number; reachedTop: boolean }>;
+  addChat(chat: string): Promise<{ synced: boolean; message: string }>;
+  /** Runs an agent on the stored history of `chat` and returns its reply without sending (agent: id, or by rule). */
+  generateReply(chat: string, agent?: string): Promise<{ text: string | null; agent: string; reason?: string; ms: number }>;
   testAgent(req: TestAgentRequest): Promise<TestAgentResult>;
   listMcpTools(serverId: string): Promise<Array<{ name: string; description?: string }>>;
+  /** Writes a script tool's files and installs its dependencies; rejects with the npm output on failure. */
+  prepareTool(tool: ToolConfig): Promise<void>;
   onEvent(cb: (e: RelayEvent) => void): () => void;
 }

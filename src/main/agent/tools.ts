@@ -1,11 +1,13 @@
-import { spawn } from 'node:child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
+import { builtinEnabled } from '@shared/builtins';
 import type { AgentConfig, AppConfig, ChatMessage, McpServerConfig, ToolConfig } from '@shared/types';
 import { expandEnv } from '../config';
-import { errText, logger, nowText } from '../util';
+import { errText, logger } from '../util';
+import { BUILTINS, runProcess } from './builtins';
+import { prepareScriptTool, runScriptTool } from './scriptTools';
 
 const log = logger.scope('tools');
 
@@ -15,43 +17,15 @@ export interface ToolImpl extends ToolDef { run(args: Record<string, unknown>, c
 
 const shellQuote = (v: unknown) => `'${String(typeof v === 'object' ? JSON.stringify(v) : v ?? '').replace(/'/g, `'\\''`)}'`;
 
-function runCommand(tool: ToolConfig, args: Record<string, unknown>): Promise<string> {
-  const cmd = tool.command.replace(/\{\{\s*(\w+)\s*\}\}/g, (_, k: string) => shellQuote(args[k]));
-  return new Promise((resolve) => {
-    const child = spawn('/bin/sh', ['-c', cmd], {
-      cwd: tool.cwd || undefined,
-      env: { ...process.env, TOOL_ARGS: JSON.stringify(args) },
-      timeout: tool.timeoutMs,
-    });
-    let out = '', err = '';
-    child.stdout.on('data', (d) => { out += d; });
-    child.stderr.on('data', (d) => { err += d; });
-    child.on('close', (code) => resolve((out || err || `(exit ${code})`).slice(0, 8000)));
-    child.on('error', (e) => resolve(`error: ${e.message}`));
+async function runCommand(tool: ToolConfig, args: Record<string, unknown>): Promise<string> {
+  const cmd = (tool.command ?? '').replace(/\{\{\s*(\w+)\s*\}\}/g, (_, k: string) => shellQuote(args[k]));
+  const r = await runProcess('/bin/sh', ['-c', cmd], {
+    cwd: tool.cwd || undefined,
+    env: { ...process.env, TOOL_ARGS: JSON.stringify(args) },
+    timeoutMs: tool.timeoutMs,
   });
+  return (r.out || r.err || `(exit ${r.code})`).slice(0, 8000);
 }
-
-const BUILTINS: Record<string, ToolImpl> = {
-  'builtin:time': {
-    name: 'get_current_time', description: '获取当前日期、星期和时间', parameters: { type: 'object', properties: {} },
-    run: async () => nowText(),
-  },
-  'builtin:history': {
-    name: 'get_chat_history', description: '读取当前会话更早的聊天记录', parameters: {
-      type: 'object', properties: { limit: { type: 'integer', description: '条数，默认 50' } },
-    },
-    run: async (args, ctx) => ctx.history.slice(-Number(args.limit ?? 50))
-      .map((m) => `${m.side === 'self' ? '我' : m.sender || ctx.chat}: ${m.text}`).join('\n') || '(无记录)',
-  },
-  'builtin:skip': {
-    name: 'skip_reply', description: '决定不回复这条消息（无需回复、与我无关、不适合自动回复时调用）', parameters: {
-      type: 'object', properties: { reason: { type: 'string' } },
-    },
-    run: async (args, ctx) => { ctx.skipped = { reason: String(args.reason ?? '') }; return 'ok, no reply will be sent'; },
-  },
-};
-
-export const BUILTIN_TOOL_IDS = Object.keys(BUILTINS);
 
 /** Connected MCP servers, reused across agent runs and reset on config change. */
 class McpPool {
@@ -113,12 +87,19 @@ class McpPool {
 
 export const mcpPool = new McpPool();
 
-/** Resolves an agent's tool list: builtin:*, custom command tool ids, mcp:<server id>. */
+/**
+ * Resolves an agent's tool list: builtin:*, custom tool ids, mcp:<server id>.
+ * A tool is used only when the agent selects it AND it is enabled globally.
+ */
 export async function resolveTools(cfg: AppConfig, agent: AgentConfig): Promise<ToolImpl[]> {
   const out: ToolImpl[] = [];
   for (const id of agent.tools ?? []) {
     try {
-      if (BUILTINS[id]) { out.push(BUILTINS[id]); continue; }
+      if (id.startsWith('builtin:')) {
+        if (!BUILTINS[id]) throw new Error('未定义');
+        if (builtinEnabled(cfg.builtinTools, id)) out.push(BUILTINS[id]);
+        continue;
+      }
       if (id.startsWith('mcp:')) {
         const s = cfg.mcpServers.find((x) => x.id === id.slice(4));
         if (!s) throw new Error('未定义');
@@ -128,7 +109,14 @@ export async function resolveTools(cfg: AppConfig, agent: AgentConfig): Promise<
       }
       const t = cfg.tools.find((x) => x.id === id);
       if (!t) throw new Error('未定义');
-      out.push({ name: t.id.replace(/[^a-zA-Z0-9_-]/g, '_'), description: t.description, parameters: t.parameters, run: (args) => runCommand(t, args) });
+      if (t.enabled === false) continue;
+      const def = { name: t.id.replace(/[^a-zA-Z0-9_-]/g, '_'), description: t.description, parameters: t.parameters };
+      if (t.type === 'script') {
+        await prepareScriptTool(t);
+        out.push({ ...def, run: (args, ctx) => runScriptTool(t, args, ctx) });
+      } else {
+        out.push({ ...def, run: (args) => runCommand(t, args) });
+      }
     } catch (e) {
       log.warn(`工具 ${id} 不可用：${errText(e)}`);
     }

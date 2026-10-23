@@ -161,18 +161,25 @@ function GeneralSettings() {
   const g = config.general;
   return (
     <ConfigCard title="全局设置" onSave={async () => {
-      const { delayMin, delayMax, ...rest } = await form.validateFields();
-      await saveConfig((c) => { c.general = { ...c.general, ...rest, replyDelayMs: [delayMin, Math.max(delayMin, delayMax)] }; });
+      const { delayMin, delayMax, foregroundSend, ...rest } = await form.validateFields();
+      await saveConfig((c) => {
+        c.general = { ...c.general, ...rest, replyDelayMs: [delayMin, Math.max(delayMin, delayMax)] };
+        c.driver = { ...c.driver, deliveryMode: foregroundSend ? 'foreground' : 'background' };
+      });
     }}>
-      <Form form={form} layout="inline" initialValues={{ ...g, delayMin: g.replyDelayMs[0], delayMax: g.replyDelayMs[1] }} style={{ rowGap: 12 }}>
+      <Form form={form} layout="inline" initialValues={{ ...g, delayMin: g.replyDelayMs[0], delayMax: g.replyDelayMs[1], foregroundSend: config.driver.deliveryMode === 'foreground' }} style={{ rowGap: 12 }}>
         <Form.Item name="myNickname" label="我的群昵称" tooltip="用于识别 @我"><Input style={{ width: 160 }} /></Form.Item>
         <Form.Item name="pollIntervalMs" label="轮询间隔(ms)"><InputNumber min={500} step={250} /></Form.Item>
         <Form.Item name="delayMin" label="回复延迟(ms)"><InputNumber min={0} step={500} /></Form.Item>
         <Form.Item name="delayMax" label="~"><InputNumber min={0} step={500} /></Form.Item>
         <Form.Item name="maxRepliesPerMinute" label="每分钟最多发送"><InputNumber min={1} /></Form.Item>
-        <Form.Item name="historyLimit" label="上下文条数"><InputNumber min={1} max={200} /></Form.Item>
+        <Form.Item name="historyLimit" label="上下文条数" tooltip="上限。超过条数或时间上限时，一次性丢弃较早的一半（类似上下文压缩），之后只追加新消息，让模型的提示词缓存持续命中；被丢弃的消息仍可通过「读取聊天记录」工具获取"><InputNumber min={1} max={200} /></Form.Item>
+        <Form.Item name="historyMinutes" label="上下文时间(分钟)" tooltip="上下文中最早消息的时间上限，超过时与条数一样批量丢弃；会话首次出现时以及点「同步历史」时，会在后台向上滚动读取这段时间内的消息。0 = 不限时间，也不向上滚动读取"><InputNumber min={0} max={1440} /></Form.Item>
+        <Form.Item name="imageMaxSize" label="图片最长边(px)" tooltip="聊天图片裁剪后压缩到该尺寸再保存 / 发送给模型"><InputNumber min={128} max={2048} step={64} /></Form.Item>
         <Form.Item name="openUnreadChats" label="自动点开未读会话" valuePropName="checked"><Switch /></Form.Item>
         <Form.Item name="restoreChat" label="处理后切回原会话" valuePropName="checked"><Switch /></Form.Item>
+        <Form.Item name="foregroundSend" label="前台快速发送" valuePropName="checked" tooltip="始终先在后台发送；只有后台输入没生效、或会话需要搜索时，才等你键鼠空闲 3 秒，把微信短暂切到前台，用快捷键搜索、粘贴并校验后发送，再恢复剪贴板并切回原来的应用。不移动鼠标"><Switch /></Form.Item>
+        <Form.Item name="restoreClipboard" label="发送后恢复剪贴板" valuePropName="checked"><Switch /></Form.Item>
       </Form>
     </ConfigCard>
   );
