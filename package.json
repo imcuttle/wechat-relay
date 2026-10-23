@@ -1,0 +1,64 @@
+{
+  "name": "wechat-relay",
+  "version": "0.1.0",
+  "description": "通过 Cua Driver 识别电脑版微信聊天并用自定义模型 / harness 自动回复",
+  "main": "out/main/index.js",
+  "private": true,
+  "scripts": {
+    "build:native": "node scripts/build-native.mjs",
+    "dev": "npm run build:native && electron-vite dev",
+    "build": "npm run typecheck && npm run build:native && electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "build:mac": "npm run build && electron-builder --mac",
+    "install:mac": "bash scripts/install-mac.sh"
+  },
+  "build": {
+    "appId": "dev.cuttleyu.wechat-relay",
+    "productName": "WeChat Relay",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "native/bin",
+        "to": "native"
+      }
+    ],
+    "npmRebuild": false,
+    "mac": {
+      "target": [
+        "dir"
+      ],
+      "identity": null,
+      "category": "public.app-category.productivity",
+      "notarize": false
+    }
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@ant-design/icons": "^6.3.4",
+    "@monaco-editor/react": "^4.7.0",
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "antd": "^6.6.7",
+    "electron": "^45.0.0",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^6.0.0",
+    "lucide-react": "^1.61.0",
+    "monaco-editor": "^0.57.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.5"
+  }
+}

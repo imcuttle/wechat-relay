@@ -1,0 +1,126 @@
+import { useState } from 'react';
+import { App, Button, Card, Col, Form, Input, InputNumber, Row, Select, Space, Switch, Tag, Typography } from 'antd';
+import { Bot, Play, Plus, Trash } from 'lucide-react';
+import type { AgentConfig, TestAgentResult } from '@shared/types';
+import CodeEditor from '../components/CodeEditor';
+import ConfigList from '../components/ConfigList';
+import { errMsg, useRelay } from '../relay';
+
+const BUILTIN = [
+  { value: 'builtin:time', label: '当前时间 (builtin:time)' },
+  { value: 'builtin:history', label: '读取聊天记录 (builtin:history)' },
+  { value: 'builtin:skip', label: '不回复 (builtin:skip)' },
+];
+
+export default function Agents() {
+  const { config } = useRelay();
+  if (!config) return null;
+  const toolOptions = [
+    { label: '内置', options: BUILTIN },
+    { label: '自定义命令', options: config.tools.map((t) => ({ value: t.id, label: `${t.id} — ${t.description}` })) },
+    { label: 'MCP 服务', options: config.mcpServers.map((m) => ({ value: `mcp:${m.id}`, label: `mcp:${m.id}${m.enabled ? '' : '（未启用）'}` })) },
+  ];
+  return (
+    <div className="page">
+      <div className="page-title"><h2><Bot size={18} />智能体</h2></div>
+      <ConfigList
+        listKey="agents"
+        title="智能体 = 引擎（模型 / Harness）+ 提示词 + 工具"
+        columns={[
+          { title: '名称', key: 'name', render: (_, a) => <Space direction="vertical" size={0}><Typography.Text strong>{a.name || a.id}</Typography.Text><Typography.Text type="secondary" style={{ fontSize: 12 }}>{a.id}</Typography.Text></Space> },
+          { title: '引擎', key: 'engine', render: (_, a) => a.engine === 'harness' ? <Tag color="purple">Harness · {a.harness}</Tag> : <Tag color="blue">{a.provider} · {a.model}</Tag> },
+          { title: '提示词', dataIndex: 'prompt', render: (v?: string) => v ? <Tag>{v}</Tag> : '-' },
+          { title: '工具', dataIndex: 'tools', render: (v: string[]) => <Space size={[4, 4]} wrap>{v.map((t) => <Tag key={t}>{t}</Tag>)}</Space> },
+        ]}
+        defaults={() => ({ id: `agent-${Date.now().toString(36)}`, engine: 'model', provider: config.providers[0]?.id, tools: ['builtin:time', 'builtin:skip'], maxToolRounds: 4, temperature: 0.7, prompt: config.prompts[0]?.id } as Partial<AgentConfig>)}
+        modalWidth={760}
+        form={(form) => (
+          <>
+            <Space style={{ display: 'flex' }} align="start">
+              <Form.Item name="id" label="ID" rules={[{ required: true }]}><Input style={{ width: 200 }} /></Form.Item>
+              <Form.Item name="name" label="名称"><Input style={{ width: 240 }} /></Form.Item>
+              <Form.Item name="engine" label="引擎"><Select style={{ width: 200 }} options={[{ value: 'model', label: '模型 API（自管工具）' }, { value: 'harness', label: 'Harness（CLI 智能体）' }]} /></Form.Item>
+            </Space>
+            <Form.Item noStyle shouldUpdate>{() => form.getFieldValue('engine') === 'harness' ? (
+              <Form.Item name="harness" label="Harness" rules={[{ required: true }]}>
+                <Select options={config.harnesses.map((h) => ({ value: h.id, label: `${h.id}（${h.type}: ${h.command}）` }))} />
+              </Form.Item>
+            ) : (
+              <Space style={{ display: 'flex' }} align="start">
+                <Form.Item name="provider" label="模型服务" rules={[{ required: true }]}><Select style={{ width: 180 }} options={config.providers.map((p) => ({ value: p.id, label: p.name || p.id }))} /></Form.Item>
+                <Form.Item name="model" label="模型" rules={[{ required: true }]}><Input style={{ width: 200 }} placeholder="deepseek-chat / gpt-4o-mini" /></Form.Item>
+                <Form.Item name="temperature" label="temperature"><InputNumber min={0} max={2} step={0.1} /></Form.Item>
+                <Form.Item name="maxTokens" label="max tokens"><InputNumber min={16} step={64} /></Form.Item>
+                <Form.Item name="maxToolRounds" label="工具轮数"><InputNumber min={0} max={20} /></Form.Item>
+              </Space>
+            )}</Form.Item>
+            <Form.Item name="prompt" label="提示词模板"><Select allowClear options={config.prompts.map((p) => ({ value: p.id, label: p.name || p.id }))} /></Form.Item>
+            <Form.Item name="systemPrompt" label="附加系统提示词" tooltip="追加在模板之后，支持 {{chat}} {{sender}} {{myNickname}} {{now}} {{#group}}...{{/group}}">
+              <CodeEditor language="markdown" height={120} />
+            </Form.Item>
+            <Form.Item name="tools" label="工具" tooltip="Harness 引擎只会使用 mcp:* 项（通过 --mcp-config 传入），其余工具由 harness 自身管理">
+              <Select mode="multiple" options={toolOptions} />
+            </Form.Item>
+          </>
+        )}
+      />
+      <TestPanel />
+    </div>
+  );
+}
+
+interface TestMsg { side: 'self' | 'other'; sender?: string; text: string }
+
+function TestPanel() {
+  const { config } = useRelay();
+  const { message } = App.useApp();
+  const [agent, setAgent] = useState<string | undefined>(config?.agents[0]?.id);
+  const [chat, setChat] = useState('测试好友');
+  const [isGroup, setIsGroup] = useState(false);
+  const [msgs, setMsgs] = useState<TestMsg[]>([{ side: 'other', text: '在吗？周末有空一起吃饭不' }]);
+  const [result, setResult] = useState<TestAgentResult | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const run = async () => {
+    if (!agent) return;
+    setBusy(true); setResult(null);
+    try { setResult(await window.relay.testAgent({ agent, chat, isGroup, messages: msgs })); } catch (e) { message.error(errMsg(e)); } finally { setBusy(false); }
+  };
+
+  return (
+    <Card size="small" title="调试智能体（不会发送到微信）">
+      <Row gutter={16}>
+        <Col span={12}>
+          <Space wrap style={{ marginBottom: 12 }}>
+            <Select style={{ width: 180 }} value={agent} onChange={setAgent} options={config?.agents.map((a) => ({ value: a.id, label: a.name || a.id }))} />
+            <Input style={{ width: 140 }} value={chat} onChange={(e) => setChat(e.target.value)} addonBefore="会话" />
+            <Space size={4}>群聊<Switch size="small" checked={isGroup} onChange={setIsGroup} /></Space>
+          </Space>
+          {msgs.map((m, i) => (
+            <Space.Compact key={i} style={{ width: '100%', marginBottom: 6 }}>
+              <Select style={{ width: 90 }} value={m.side} onChange={(side) => setMsgs(msgs.map((x, j) => (j === i ? { ...x, side } : x)))} options={[{ value: 'other', label: '对方' }, { value: 'self', label: '我' }]} />
+              {isGroup && m.side === 'other' && <Input style={{ width: 110 }} placeholder="发送者" value={m.sender} onChange={(e) => setMsgs(msgs.map((x, j) => (j === i ? { ...x, sender: e.target.value } : x)))} />}
+              <Input value={m.text} onChange={(e) => setMsgs(msgs.map((x, j) => (j === i ? { ...x, text: e.target.value } : x)))} />
+              <Button icon={<Trash size={14} />} onClick={() => setMsgs(msgs.filter((_, j) => j !== i))} />
+            </Space.Compact>
+          ))}
+          <Space>
+            <Button size="small" icon={<Plus size={14} />} onClick={() => setMsgs([...msgs, { side: 'other', text: '' }])}>添加消息</Button>
+            <Button size="small" type="primary" icon={<Play size={14} />} loading={busy} onClick={() => void run()}>运行</Button>
+          </Space>
+        </Col>
+        <Col span={12}>
+          {result && (
+            <>
+              <Typography.Text type="secondary">{result.ms}ms</Typography.Text>
+              {result.ok
+                ? result.skipped ? <div><Tag>不回复</Tag></div> : <div className="bubble bot" style={{ margin: '6px 0' }}>{result.reply}</div>
+                : <Typography.Paragraph type="danger" className="mono">{result.error}</Typography.Paragraph>}
+              {result.trace.map((t, i) => <div key={i} className="mono log-line">{t}</div>)}
+            </>
+          )}
+        </Col>
+      </Row>
+    </Card>
+  );
+}

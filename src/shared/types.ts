@@ -1,0 +1,279 @@
+// Types shared by main and renderer.
+
+export type ChatType = 'any' | 'private' | 'group';
+export type ReplyMode = 'auto' | 'review';
+
+export interface GeneralConfig {
+  /** Master switch for sending replies (monitoring still runs when false). */
+  autoReply: boolean;
+  /** auto = send immediately, review = queue drafts for approval in the UI. */
+  mode: ReplyMode;
+  pollIntervalMs: number;
+  /** Your WeChat nickname, used to detect @mentions in groups. */
+  myNickname: string;
+  /** Random delay before sending, [min, max] ms; new messages arriving during the delay are batched. */
+  replyDelayMs: [number, number];
+  /** Click into chats that show an unread badge and match a reply rule. */
+  openUnreadChats: boolean;
+  /** Return to the chat that was open before the bot switched away. */
+  restoreChat: boolean;
+  restoreClipboard: boolean;
+  maxRepliesPerMinute: number;
+  /** How many history messages are given to the agent. */
+  historyLimit: number;
+}
+
+export interface DriverConfig {
+  /** Path to cua-driver-mcp (or `cua-driver`), "auto" to detect the one bundled with CodeBuddy. */
+  command: string;
+  args: string[];
+  deliveryMode: 'background' | 'foreground';
+}
+
+export interface ProviderConfig {
+  id: string;
+  name?: string;
+  /** openai = any OpenAI-compatible endpoint (OpenAI, DeepSeek, Kimi, Qwen, GLM, Ollama, OpenRouter...). */
+  type: 'openai' | 'anthropic';
+  baseUrl: string;
+  apiKey: string;
+  headers?: Record<string, string>;
+}
+
+export interface HarnessConfig {
+  id: string;
+  name?: string;
+  /** codebuddy / claude-code: headless `-p` mode; command: any CLI that reads the prompt on stdin and prints the reply. */
+  type: 'codebuddy' | 'claude-code' | 'command';
+  command: string;
+  args: string[];
+  model?: string;
+  cwd?: string;
+  env?: Record<string, string>;
+  timeoutMs: number;
+  /** Keep one harness session per chat (codebuddy / claude-code). */
+  sessionPerChat: boolean;
+  /** Pass the configured MCP servers of the agent to the harness via --mcp-config. */
+  passMcpServers: boolean;
+}
+
+export interface ToolConfig {
+  id: string;
+  description: string;
+  /** JSON Schema of the arguments. */
+  parameters: Record<string, unknown>;
+  /** Shell command; {{arg}} placeholders are replaced with shell-quoted values. Args are also in $TOOL_ARGS (JSON). */
+  command: string;
+  cwd?: string;
+  timeoutMs: number;
+}
+
+export interface McpServerConfig {
+  id: string;
+  /** stdio */
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  /** streamable HTTP / SSE */
+  url?: string;
+  headers?: Record<string, string>;
+  enabled: boolean;
+}
+
+export interface PromptConfig {
+  id: string;
+  name?: string;
+  content: string;
+}
+
+export interface AgentConfig {
+  id: string;
+  name?: string;
+  engine: 'model' | 'harness';
+  provider?: string;
+  model?: string;
+  temperature?: number;
+  maxTokens?: number;
+  harness?: string;
+  /** Prompt id from `prompts`; `systemPrompt` is appended after it. */
+  prompt?: string;
+  systemPrompt?: string;
+  /** builtin:time, builtin:history, builtin:skip, <tool id>, mcp:<server id> */
+  tools: string[];
+  maxToolRounds: number;
+}
+
+export interface RuleMatch {
+  /** Chat names: exact, `*` wildcard or /regex/. Empty = all chats. */
+  chats?: string[];
+  excludeChats?: string[];
+  chatType?: ChatType;
+  /** Group chats: only when you are @mentioned (or @所有人 when includeAtAll). */
+  mentionOnly?: boolean;
+  includeAtAll?: boolean;
+  /** Any of these substrings / /regex/ in the new messages. */
+  keywords?: string[];
+  /** Group sender names (exact / wildcard / regex). */
+  senders?: string[];
+}
+
+export interface RuleConfig {
+  id: string;
+  name?: string;
+  enabled: boolean;
+  match: RuleMatch;
+  action: 'reply' | 'ignore';
+  agent?: string;
+  /** Overrides general.mode for this rule. */
+  mode?: ReplyMode | 'inherit';
+  cooldownSec: number;
+}
+
+export interface AppConfig {
+  general: GeneralConfig;
+  driver: DriverConfig;
+  providers: ProviderConfig[];
+  harnesses: HarnessConfig[];
+  tools: ToolConfig[];
+  mcpServers: McpServerConfig[];
+  prompts: PromptConfig[];
+  agents: AgentConfig[];
+  rules: RuleConfig[];
+}
+
+// ---- Vision output (native/wx-vision) ----
+
+export interface VisionSession {
+  name: string; preview: string; time: string;
+  x: number; y: number; top: number; bottom: number;
+  unread: boolean; selected: boolean; mentioned: boolean;
+}
+export interface VisionMessage {
+  side: 'self' | 'other' | 'system';
+  sender?: string | null;
+  text: string;
+  kind: 'text' | 'media' | 'time' | 'system';
+  top: number; bottom: number; partial: boolean;
+}
+export interface VisionLayout {
+  sidebarRight: number; listLeft: number; listRight: number; chatLeft: number; chatRight: number;
+  headerBottom: number; inputTop: number; input: { x: number; y: number }; send?: { x: number; y: number } | null;
+  dark: boolean; chatBg: number[];
+}
+export interface VisionResult {
+  ok: boolean; error?: string | null;
+  width: number; height: number; scale: number;
+  layout?: VisionLayout; title?: string | null; isGroup: boolean;
+  sessions: VisionSession[]; messages: VisionMessage[];
+  lines: Array<{ text: string; x: number; y: number; w: number; h: number; conf: number }>;
+  ms: number;
+}
+
+// ---- Runtime ----
+
+export interface ChatMessage {
+  id: string;
+  side: 'self' | 'other';
+  sender?: string;
+  text: string;
+  at: number;
+  /** ocr = seen on screen; bot = sent by this app */
+  source: 'ocr' | 'bot';
+}
+
+export interface ChatSummary {
+  name: string;
+  isGroup: boolean;
+  lastAt: number;
+  lastText: string;
+  count: number;
+  paused: boolean;
+}
+
+export interface Draft {
+  id: string;
+  chat: string;
+  text: string;
+  agent: string;
+  rule: string;
+  createdAt: number;
+  status: 'pending' | 'sent' | 'rejected' | 'failed';
+  error?: string;
+  trigger: string;
+}
+
+export interface LogEntry {
+  at: number;
+  level: 'debug' | 'info' | 'warn' | 'error';
+  scope: string;
+  message: string;
+}
+
+export interface MonitorStatus {
+  running: boolean;
+  driver: 'stopped' | 'starting' | 'ready' | 'error';
+  driverError?: string;
+  wechat?: { pid: number; windowId: number; width: number; height: number } | null;
+  permissions?: { accessibility: boolean; screenRecording: boolean } | null;
+  currentChat?: string | null;
+  lastTickAt?: number;
+  lastTickMs?: number;
+  ticks: number;
+  replies: number;
+  busy: boolean;
+  configPath: string;
+}
+
+export interface Snapshot {
+  at: number;
+  image: string; // data URL
+  vision: VisionResult;
+}
+
+export interface TestAgentRequest {
+  agent: string;
+  chat: string;
+  isGroup: boolean;
+  messages: Array<{ side: 'self' | 'other'; sender?: string; text: string }>;
+}
+
+export interface TestAgentResult {
+  ok: boolean;
+  reply?: string | null;
+  skipped?: boolean;
+  error?: string;
+  trace: string[];
+  ms: number;
+}
+
+export type RelayEvent =
+  | { type: 'status'; status: MonitorStatus }
+  | { type: 'log'; entry: LogEntry }
+  | { type: 'snapshot'; snapshot: Snapshot }
+  | { type: 'chat'; chat: string; message: ChatMessage }
+  | { type: 'draft'; draft: Draft }
+  | { type: 'config'; config: AppConfig };
+
+export interface RelayApi {
+  getStatus(): Promise<MonitorStatus>;
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  tickOnce(): Promise<void>;
+  getConfig(): Promise<AppConfig>;
+  saveConfig(config: AppConfig): Promise<void>;
+  getConfigYaml(): Promise<string>;
+  saveConfigYaml(yaml: string): Promise<void>;
+  openConfigFile(): Promise<void>;
+  getLogs(): Promise<LogEntry[]>;
+  getChats(): Promise<ChatSummary[]>;
+  getHistory(chat: string): Promise<ChatMessage[]>;
+  setChatPaused(chat: string, paused: boolean): Promise<void>;
+  clearHistory(chat: string): Promise<void>;
+  getDrafts(): Promise<Draft[]>;
+  approveDraft(id: string, text?: string): Promise<void>;
+  rejectDraft(id: string): Promise<void>;
+  sendManual(chat: string, text: string): Promise<void>;
+  testAgent(req: TestAgentRequest): Promise<TestAgentResult>;
+  listMcpTools(serverId: string): Promise<Array<{ name: string; description?: string }>>;
+  onEvent(cb: (e: RelayEvent) => void): () => void;
+}

@@ -1,0 +1,17 @@
+html, body, #root { height: 100%; margin: 0; }
+body { background: #f5f6f8; -webkit-font-smoothing: antialiased; }
+.drag { -webkit-app-region: drag; }
+.no-drag { -webkit-app-region: no-drag; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.page { padding: 20px 24px; height: 100%; overflow: auto; box-sizing: border-box; }
+.page-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+.page-title h2 { margin: 0; font-size: 18px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.snapshot { position: relative; display: inline-block; max-width: 100%; }
+.snapshot img { max-width: 100%; display: block; border-radius: 8px; border: 1px solid #e5e7eb; }
+.snapshot .box { position: absolute; border: 1.5px solid; border-radius: 4px; pointer-events: none; }
+.bubble { width: fit-content; max-width: 100%; padding: 6px 10px; border-radius: 8px; white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
+.bubble.other { background: #fff; border: 1px solid #eef0f2; }
+.bubble.self { background: #95ec69; }
+.bubble.bot { background: #c7f0ff; }
+.log-line { padding: 2px 0; border-bottom: 1px dashed #f0f0f0; white-space: pre-wrap; word-break: break-all; }
+.yaml-editor textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace !important; font-size: 12px !important; line-height: 1.6 !important; }
