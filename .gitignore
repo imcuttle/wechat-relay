@@ -7,3 +7,4 @@ native/bin/
 wechat-relay-promo/stills/
 wechat-relay-promo/voices/.cache/
 wechat-relay-promo/events.json
+wechat-relay-promo/publish/
