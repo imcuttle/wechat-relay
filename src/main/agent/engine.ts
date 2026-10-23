@@ -70,7 +70,13 @@ function finish(text: string | null | undefined, ctx: ToolCtx, trace: string[]):
 async function postJson(url: string, headers: Record<string, string>, body: unknown, timeoutMs = 120000): Promise<any> {
   const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
   const raw = await res.text();
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${raw.slice(0, 500)}`);
+  if (!res.ok) {
+    const hint: Record<number, string> = {
+      401: 'API Key 无效或未设置', 402: '账户余额不足，请充值或换用其他模型服务', 403: '无权访问该模型',
+      404: '接口地址或模型名错误', 429: '请求过于频繁或额度用尽', 500: '模型服务内部错误', 503: '模型服务暂不可用',
+    };
+    throw new Error(`${hint[res.status] ? `${hint[res.status]}（HTTP ${res.status}）` : `HTTP ${res.status}`}: ${raw.slice(0, 300)}`);
+  }
   return JSON.parse(raw);
 }
 
