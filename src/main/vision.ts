@@ -12,8 +12,8 @@ export function visionBinary(appRoot: string, resourcesPath?: string): string {
   return candidates.find((c) => existsSync(c)) ?? candidates[candidates.length - 1];
 }
 
-export interface CropResult { ok: boolean; error?: string | null; width: number; height: number; bytes: number; std?: number }
-export interface OcrResult { ok: boolean; text: string; width: number; height: number; std: number }
+export interface CropResult { ok: boolean; error?: string | null; width: number; height: number; bytes: number; std?: number; flat?: number }
+export interface OcrResult { ok: boolean; text: string; width: number; height: number; std: number; flat?: number }
 export interface ClipResult { ok: boolean; error?: string | null; restored?: boolean | null }
 export interface WinInfo { id: number; layer: number; x: number; y: number; w: number; h: number; name?: string | null }
 type Reply = { result?: VisionResult; crop?: CropResult; clip?: ClipResult; windows?: WinInfo[]; luma?: number[]; ocr?: OcrResult };

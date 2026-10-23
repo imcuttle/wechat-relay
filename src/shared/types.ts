@@ -70,6 +70,40 @@ export interface HarnessConfig {
   prewarm: boolean;
 }
 
+/**
+ * Voice messages: the reply is synthesised with a TTS service, played into a virtual audio device (e.g. BlackHole) and
+ * recorded by WeChat's own voice button. The system default input is switched to the virtual device only for that
+ * moment and always restored; if the real microphone is in use by another app, the reply is sent as text instead.
+ */
+export interface VoiceConfig {
+  enabled: boolean;
+  /**
+   * openai = any OpenAI-compatible /audio/speech (OpenAI, SiliconFlow CosyVoice, local servers...);
+   * elevenlabs; fish = Fish Audio; gpt-sovits = local api_v2 (zero-shot clone from refAudio); command = shell command.
+   */
+  provider: 'openai' | 'elevenlabs' | 'fish' | 'gpt-sovits' | 'command';
+  baseUrl: string;
+  apiKey: string;
+  model?: string;
+  /** Voice name (openai), voice_id (elevenlabs), reference_id of a cloned voice (fish) or a custom voice uri. */
+  voice?: string;
+  /** Your own voice sample (10-20 s of clean speech) and its transcript; used by gpt-sovits (and sent to fish when no reference id). */
+  refAudio?: string;
+  refText?: string;
+  /** provider=command: `{{text}}` and `{{out}}` placeholders, must write an audio file to {{out}}. */
+  command?: string;
+  speed?: number;
+  /** Replies longer than this (characters) are sent as text. */
+  maxChars: number;
+  /** Replies longer than this many seconds of audio are sent as text (WeChat voice limit is 60 s). */
+  maxSeconds: number;
+  /** Substring of the virtual device name that WeChat records from. */
+  virtualDevice: string;
+  /** Distance from the 发送 button to the voice-message button, in points (WeChat 4.1.9+). */
+  buttonOffset: number;
+  timeoutMs: number;
+}
+
 export interface MemoryConfig {
   /** Master switch of memory: the memory section of the system prompt + file tools for the memory dir. */
   enabled: boolean;
@@ -198,6 +232,8 @@ export interface RuleConfig {
   /** Overrides general.mode for this rule. */
   mode?: ReplyMode | 'inherit';
   cooldownSec: number;
+  /** Send replies of this rule as voice messages (needs voice.enabled). never = text only. */
+  voice?: 'inherit' | 'never' | 'always';
 }
 
 export interface AppConfig {
@@ -210,6 +246,7 @@ export interface AppConfig {
   tools: ToolConfig[];
   mcpServers: McpServerConfig[];
   memory: MemoryConfig;
+  voice: VoiceConfig;
   /** Skills switch, independent of memory: skill index in the prompt + file tools for the skills dir. */
   skillsEnabled: boolean;
   skills: SkillConfig[];
@@ -320,6 +357,8 @@ export interface Draft {
   status: 'pending' | 'sent' | 'rejected' | 'failed';
   error?: string;
   trigger: string;
+  /** Send as a voice message (falls back to text when it cannot be done safely). */
+  voice?: boolean;
 }
 
 export interface LogEntry {

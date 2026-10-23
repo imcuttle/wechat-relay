@@ -1,18 +1,20 @@
 import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { casesText, personaPromptId, promptText } from '@shared/prompt';
 import type { AppConfig, ChatMessage, Draft, MonitorStatus, PersonaOptions, PromptConfig, RuleConfig, VisionMessage } from '@shared/types';
+import { AudioRig, VoiceFailed, VoiceUnavailable } from './audio';
 import { completeText, runAgent } from './agent/engine';
 import { noteMessages } from './agent/dream';
 import { ContextWindows } from './agent/window';
-import { CONFIG_PATH, MEDIA_DIR } from './config';
+import { CACHE_DIR, CONFIG_PATH, MEDIA_DIR } from './config';
 import { CuaDriver } from './driver';
 import { matchRule } from './rules';
 import { dropImages, store } from './store';
 import { parseWxTime, stamp } from './timeline';
 import { errText, isNoiseText, logger, sleep } from './util';
 import { Vision } from './vision';
+import { speakable, synthesize } from './voice';
 import { NotInListError, SafetyStop, WeChat, normText, sameChat, similarity, type Frame } from './wechat';
 
 const log = logger.scope('monitor');
@@ -20,6 +22,9 @@ const log = logger.scope('monitor');
 /** Limits of syncHistory: at most this many scroll steps / messages. */
 const SYNC_STEPS = 60;
 const SYNC_MAX = 300;
+/** Images / videos still loading when first seen: re-capture up to this many times, this long apart. */
+const LOADING_RETRIES = 8;
+const LOADING_WAIT_MS = 1200;
 
 interface Pending { chat: string; isGroup: boolean; rule: RuleConfig; incoming: ChatMessage[]; due: number }
 
@@ -168,12 +173,15 @@ export class Monitor extends EventEmitter {
   /** Chats whose history before the first screen we saw is unknown: scroll up to read it before replying. */
   private needBackfill = new Set<string>();
   private failures = 0;
+  private audio: AudioRig;
   private status: MonitorStatus;
 
   constructor(private cfg: AppConfig, visionBin: string) {
     super();
     this.driver = new CuaDriver(cfg.driver);
     this.vision = new Vision(visionBin);
+    this.audio = new AudioRig(join(dirname(visionBin), 'wx-audio'));
+    void this.audio.recover();
     this.wechat = new WeChat(this.driver, this.vision, () => ({
       foreground: this.cfg.driver.deliveryMode === 'foreground',
       restoreClipboard: this.cfg.general.restoreClipboard,
@@ -345,8 +353,26 @@ export class Monitor extends EventEmitter {
     for (const m of msgs) if (m.side === 'self' && sent.some((t) => similarity(t, m.text) >= 0.7)) m.source = 'bot';
   }
 
+  /**
+   * True while an image / video message is still loading: its bubble is a flat grey (or black) placeholder without any
+   * text. Such a crop would be recorded as an empty picture, so ingest waits for it to render first.
+   */
+  private async isLoading(frame: Frame, m: Seen, settle: number): Promise<boolean> {
+    if (m.kind !== 'image' || !m.box) return false;
+    mkdirSync(CACHE_DIR, { recursive: true });
+    const out = join(CACHE_DIR, 'loading-probe.jpg');
+    try {
+      const r = await this.vision.crop(frame.path, m.box, out, 256);
+      if (!r.ok) return false;
+      // Blank / black: keep waiting. Merely flat (grey placeholder, or a real picture on a plain background): only a short while.
+      if (!((r.std ?? 99) < 6 || ((r.flat ?? 0) >= 0.9 && settle < 2))) return false;
+      const o = await this.vision.ocr(out).catch(() => null);
+      return !o?.text.replace(/[•·.。…⋯\s]/g, '');
+    } catch { return false; } finally { rmSync(out, { force: true }); }
+  }
+
   /** Diff the open chat against stored history; schedule replies for new incoming messages. */
-  private async ingest(frame: Frame, unreadHint: number): Promise<void> {
+  private async ingest(frame: Frame, unreadHint: number, settle = 0): Promise<void> {
     const chat = frame.vision.title;
     if (!chat) return;
     const isGroup = frame.vision.isGroup;
@@ -361,12 +387,28 @@ export class Monitor extends EventEmitter {
       log.debug(`「${name}」屏幕显示的是已记录的较早内容（可能在向上翻看历史），跳过`);
       return;
     }
-    if (start < 0) {
-      if (state.messages.length) log.debug(`「${name}」屏幕内容与记录无重叠，重新同步`);
-      this.needBackfill.add(name);
+    const resync = start < 0;
+    if (resync) {
       // First sight (or resync): everything on screen is old unless the chat had an unread badge.
       const others = visible.map((m, i) => ({ m, i })).filter((x) => x.m.side === 'other');
       start = unreadHint > 0 && others.length ? others[Math.max(0, others.length - unreadHint)].i : visible.length;
+    }
+
+    // New pictures / videos that are still loading: give WeChat a moment to render them, then look again.
+    if (settle < LOADING_RETRIES && visible.slice(start).some((m) => m.kind === 'image')) {
+      const loading = [];
+      for (const m of visible.slice(start)) if (await this.isLoading(frame, m, settle)) loading.push(m);
+      if (loading.length) {
+        log.debug(`「${name}」有 ${loading.length} 张图片 / 视频仍在加载，等待后重新识别（第 ${settle + 1} 次）`);
+        await sleep(LOADING_WAIT_MS);
+        const next = await this.wechat.capture();
+        if (sameChat(next.vision.title, name)) return this.ingest(next, unreadHint, settle + 1);
+      }
+    }
+
+    if (resync) {
+      if (state.messages.length) log.debug(`「${name}」屏幕内容与记录无重叠，重新同步`);
+      this.needBackfill.add(name);
       const old = visible.slice(0, start);
       for (const m of old) m.id = store.id();
       this.tagBot(name, old);
@@ -435,6 +477,7 @@ export class Monitor extends EventEmitter {
     const draft: Draft = {
       id: store.id(), chat: p.chat, text: out.reply, agent: agentId, rule: p.rule.id, createdAt: Date.now(), status: 'pending',
       trigger: p.incoming.map((m) => (m.sender ? `${m.sender}: ${m.text}` : m.text)).join('\n'),
+      voice: this.cfg.voice.enabled && p.rule.voice === 'always' ? true : undefined,
     };
     store.markReply(p.chat, p.rule.id);
     if (mode !== 'auto' || !canAct) {
@@ -665,6 +708,28 @@ export class Monitor extends EventEmitter {
     return this.sentAt.length >= this.cfg.general.maxRepliesPerMinute;
   }
 
+  /**
+   * Sends the draft as a voice message. Returns the screen afterwards, or undefined when voice is not possible and nothing
+   * was done in WeChat (the caller then sends the text). Errors after the recording started propagate: no text is sent then.
+   */
+  private async tryVoice(draft: Draft): Promise<Frame | undefined> {
+    const v = this.cfg.voice;
+    const say = speakable(draft.text);
+    try {
+      if (!v.enabled) throw new VoiceUnavailable('语音功能未开启');
+      if (!say) throw new VoiceUnavailable('回复里没有可朗读的文字');
+      if (say.length > v.maxChars) throw new VoiceUnavailable(`回复 ${say.length} 字，超过语音上限 ${v.maxChars} 字`);
+      const audio = await synthesize(v, say);
+      const frame = await this.wechat.sendVoice(draft.chat, this.audio, v, audio.file);
+      log.info(`已用语音发送到「${draft.chat}」：${say.slice(0, 60)}`);
+      return frame;
+    } catch (e) {
+      if (e instanceof VoiceFailed || e instanceof SafetyStop) throw e;
+      log.warn(`语音发送不可用，改发文字：${this.wechat.describeError(e)}`);
+      return undefined;
+    }
+  }
+
   /** Must run inside the lock. */
   private async deliver(draft: Draft): Promise<void> {
     if (this.rateLimited()) {
@@ -673,7 +738,7 @@ export class Monitor extends EventEmitter {
     } else {
       try {
         const last = store.history(draft.chat).at(-1);
-        const frame = await this.wechat.sendText(draft.chat, draft.text);
+        const frame = (draft.voice && (await this.tryVoice(draft))) || (await this.wechat.sendText(draft.chat, draft.text));
         this.sentAt.push(Date.now());
         // Manual sends are the user's own messages: leave them untagged so they show as「我」.
         if (draft.agent !== 'manual') {

@@ -1,7 +1,8 @@
 import { execFile } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { VisionResult } from '@shared/types';
+import type { VisionResult, VoiceConfig } from '@shared/types';
+import { AudioRig, NotRecordingError, VoiceFailed, VoiceUnavailable } from './audio';
 import { CACHE_DIR } from './config';
 import { CuaDriver, structured, text } from './driver';
 import { errText, logger, sleep } from './util';
@@ -392,8 +393,12 @@ export class WeChat {
     const l = f.vision.layout;
     if (!l) return '';
     const bottom = l.send ? l.send.y - 20 * f.scale : f.height;
+    // The empty box shows a gray placeholder at the same spot as typed text ("按住鼠标 语音输入文字", or the
+    // English / Traditional variants); it is not user content.
+    const isPlaceholder = (x: { text: string }): boolean =>
+      /^(按住.{0,6}[语語]音[输輸]入|hold.{0,12}(voice|dictat))/i.test(x.text.replace(/\s+/g, ''));
     return f.vision.lines
-      .filter((x) => x.y >= l.inputTop && x.y + x.h / 2 < bottom && x.x >= l.chatLeft)
+      .filter((x) => x.y >= l.inputTop && x.y + x.h / 2 < bottom && x.x >= l.chatLeft && !isPlaceholder(x))
       .sort((a, b) => a.y - b.y || a.x - b.x)
       .map((x) => x.text)
       .join('');
@@ -484,6 +489,90 @@ export class WeChat {
     f = await this.capture();
     if (this.inputText(f)) log.warn(`发送后输入框仍有内容：「${this.inputText(f).slice(0, 30)}」`);
     return f;
+  }
+
+  /** Saves a screenshot of a voice-sending step (debug aid: the recording UI differs between WeChat versions). */
+  private debugFrame(f: Frame, step: string): void {
+    try {
+      const dir = join(CACHE_DIR, 'voice-debug');
+      mkdirSync(dir, { recursive: true });
+      copyFileSync(f.path, join(dir, `${step}.png`));
+    } catch { /* debug only */ }
+  }
+
+  /** OCR lines of the input area as one string; changes when the recording UI replaces the input box. */
+  private inputArea(f: Frame): string {
+    const l = f.vision.layout;
+    if (!l) return '';
+    return f.vision.lines.filter((x) => x.y >= l.inputTop && x.x >= l.chatLeft).sort((a, b) => a.y - b.y || a.x - b.x).map((x) => x.text.trim()).join('|');
+  }
+
+  /**
+   * Sends `file` as a WeChat voice message: opens the chat (background when possible), clicks the voice button, plays the
+   * audio into the virtual input device, then clicks the send control of the recording panel. Every step is verified; when
+   * the recording does not start in the background and foreground mode is on, it is retried in the short foreground window.
+   * Throws VoiceUnavailable while nothing has happened yet (caller sends text), VoiceFailed afterwards.
+   */
+  async sendVoice(chat: string, rig: AudioRig, cfg: VoiceConfig, file: string): Promise<Frame> {
+    const fgAllowed = this.opts().foreground;
+    const { virtual, real } = await rig.preflight(cfg, file);
+    let opened: Frame | null = null;
+    try {
+      opened = await this.openChat(chat);
+    } catch (e) {
+      if (!(e instanceof NotInListError)) throw e;
+      if (!fgAllowed) throw new VoiceUnavailable(`${e.message}，语音需要前台搜索打开`);
+    }
+    if (opened) {
+      try {
+        return await this.voiceInner(opened, chat, rig, cfg, file, virtual, real);
+      } catch (e) {
+        if (!(e instanceof NotRecordingError) || !fgAllowed) throw e;
+        log.info('后台点击语音按钮没有开始录音，改为前台快速发送');
+      }
+    }
+    return this.withForeground(async () => this.voiceInner(opened ?? (await this.searchChatFg(chat)), chat, rig, cfg, file, virtual, real));
+  }
+
+  private async voiceInner(opened: Frame, chat: string, rig: AudioRig, cfg: VoiceConfig, file: string, virtual: Parameters<AudioRig['withVirtualInput']>[0], real: Parameters<AudioRig['withVirtualInput']>[1]): Promise<Frame> {
+    const f0 = this.fg ? await this.capture() : opened;
+    if (!sameChat(f0.vision.title, chat)) throw new Error(`当前会话不是「${chat}」（${f0.vision.title ?? '无'}），未发送`);
+    const l = f0.vision.layout;
+    if (!l?.input || !l.send) throw new Error('未识别到输入框 / 发送按钮');
+    if (this.inputText(f0)) throw new VoiceUnavailable('输入框里有未发送的内容，语音改发文字');
+    const bx = Math.round(l.send.x - cfg.buttonOffset * f0.scale), by = Math.round(l.send.y);
+    const idle = this.inputArea(f0);
+    this.debugFrame(f0, '0-idle');
+    return rig.withVirtualInput(virtual, real, async () => {
+      await this.act('click', { x: bx, y: by });
+      await sleep(700);
+      const f1 = await this.capture();
+      this.debugFrame(f1, '1-after-click');
+      if (!sameChat(f1.vision.title, chat)) throw new SafetyStop(`点击语音按钮后会话变成了「${f1.vision.title ?? '无'}」`);
+      if (this.inputArea(f1) === idle) throw new NotRecordingError('点击语音按钮后界面没有变化（没有开始录音）');
+      // Recording has started: from here on a failure must not fall back to text.
+      try {
+        await sleep(300);
+        await rig.play(file, virtual);
+        await sleep(500);
+        const f2 = await this.capture();
+        this.debugFrame(f2, '2-after-play');
+        if (!sameChat(f2.vision.title, chat)) throw new SafetyStop(`录音过程中会话变成了「${f2.vision.title ?? '无'}」`);
+        const lines = f2.vision.lines.filter((x) => x.y >= l.inputTop - 40 * f2.scale && x.x >= l.chatLeft);
+        const sendBtn = lines.filter((x) => /^(发送|Send|發送|完成)$/.test(x.text.trim())).sort((a, b) => b.y - a.y)[0];
+        if (!sendBtn) throw new VoiceFailed('没有在录音界面找到「发送」控件，已取消这条语音');
+        await this.act('click', { x: Math.round(sendBtn.x + sendBtn.w / 2), y: Math.round(sendBtn.y + sendBtn.h / 2) });
+        await sleep(900);
+        const f3 = await this.capture();
+        this.debugFrame(f3, '3-after-send');
+        if (this.inputArea(f3) !== idle && !sameChat(f3.vision.title, chat)) throw new SafetyStop('发送语音后会话发生变化');
+        if (this.inputArea(f3) !== idle) throw new VoiceFailed('点击发送后录音界面仍在，请检查微信');
+        return f3;
+      } catch (e) {
+        await this.act('press_key', { key: 'escape' }).catch(() => undefined);
+        throw e instanceof SafetyStop || e instanceof VoiceFailed ? e : new VoiceFailed(`发送语音出错：${errText(e)}`);
+      }
+    });
   }
 
   describeError(e: unknown): string {

@@ -91,30 +91,39 @@ func ocrRegion(_ cg: CGImage, _ rect: CGRect, upscale: Double = 3) -> String {
 }
 
 /// Luminance standard deviation (0-255): near 0 = flat / black / blank image.
-func lumaStd(_ cg: CGImage) -> Double {
+func lumaStd(_ cg: CGImage) -> Double { lumaStats(cg).std }
+
+/// Luminance spread plus the share of pixels within ~one luminance bucket of the dominant one (≈ 1 for a flat grey
+/// "loading" placeholder, even with a small spinner / play icon on it).
+func lumaStats(_ cg: CGImage) -> (std: Double, flat: Double) {
     let w = 64, h = 64
     var data = [UInt8](repeating: 0, count: w * h * 4)
     guard let ctx = CGContext(data: &data, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
-                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return 0 }
+                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return (0, 1) }
     ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
     var sum = 0.0, sq = 0.0
+    var bins = [Int](repeating: 0, count: 33)
     for i in stride(from: 0, to: data.count, by: 4) {
         let l = (Double(data[i]) * 3 + Double(data[i + 1]) * 6 + Double(data[i + 2])) / 10
         sum += l; sq += l * l
+        bins[Int(l) / 8] += 1
     }
     let n = Double(w * h), m = sum / n
-    return (max(0, sq / n - m * m)).squareRoot()
+    var best = 0
+    for b in 0..<32 { best = max(best, bins[b] + bins[b + 1]) }
+    return ((max(0, sq / n - m * m)).squareRoot(), Double(best) / n)
 }
 
 struct OcrReq: Decodable { var image: String }
-struct OcrResult: Encodable { var ok: Bool; var text: String; var width: Int; var height: Int; var std: Double }
+struct OcrResult: Encodable { var ok: Bool; var text: String; var width: Int; var height: Int; var std: Double; var flat: Double = 0 }
 
 func ocrFile(_ r: OcrReq) -> OcrResult {
     guard let img = NSImage(contentsOfFile: r.image) else { return OcrResult(ok: false, text: "", width: 0, height: 0, std: 0) }
     var rect = CGRect(origin: .zero, size: img.size)
     guard let cg = img.cgImage(forProposedRect: &rect, context: nil, hints: nil) else { return OcrResult(ok: false, text: "", width: 0, height: 0, std: 0) }
+    let st = lumaStats(cg)
     return OcrResult(ok: true, text: ocrRegion(cg, CGRect(x: 0, y: 0, width: cg.width, height: cg.height), upscale: 3),
-                     width: cg.width, height: cg.height, std: lumaStd(cg))
+                     width: cg.width, height: cg.height, std: st.std, flat: st.flat)
 }
 
 // MARK: - Output model
@@ -544,7 +553,7 @@ func analyze(path: String, scaleHint: Double?) -> Result {
 // MARK: - Crop
 
 struct CropReq: Decodable { var image: String; var x: Double; var y: Double; var w: Double; var h: Double; var out: String; var maxDim: Int?; var quality: Double? }
-struct CropResult: Encodable { var ok: Bool; var error: String?; var width: Int; var height: Int; var bytes: Int; var std: Double = 0 }
+struct CropResult: Encodable { var ok: Bool; var error: String?; var width: Int; var height: Int; var bytes: Int; var std: Double = 0; var flat: Double = 0 }
 
 /// Crops a region of a screenshot, downsizes it so the longer side is at most `maxDim` and writes a JPEG.
 func crop(_ r: CropReq) -> CropResult {
@@ -564,7 +573,8 @@ func crop(_ r: CropReq) -> CropResult {
     guard let scaled = ctx.makeImage(),
           let data = NSBitmapImageRep(cgImage: scaled).representation(using: .jpeg, properties: [.compressionFactor: r.quality ?? 0.7]) else { return fail("encode failed") }
     do { try data.write(to: URL(fileURLWithPath: r.out)) } catch { return fail("write failed: \(error)") }
-    return CropResult(ok: true, error: nil, width: w, height: h, bytes: data.count, std: lumaStd(scaled))
+    let st = lumaStats(scaled)
+    return CropResult(ok: true, error: nil, width: w, height: h, bytes: data.count, std: st.std, flat: st.flat)
 }
 
 // MARK: - Entry
