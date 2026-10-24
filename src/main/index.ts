@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { app, BrowserWindow, dialog, ipcMain, nativeImage, net, Notification, protocol, shell } from 'electron';
-import type { AppConfig, ChatMessage, DebugSection, Draft, Persona, PromptCase, PersonaOptions, RelayEvent, ReplyMode, TestAgentRequest, TestAgentResult, ToolConfig } from '@shared/types';
+import type { AppConfig, ChatMessage, DebugSection, Draft, Persona, PromptCase, PersonaOptions, RelayEvent, ReplyMode, SyncOptions, TestAgentRequest, TestAgentResult, ToolConfig } from '@shared/types';
 import { dream } from './agent/dream';
 import { runAgent, syncHarnesses } from './agent/engine';
 import { acpPool } from './agent/acp';
@@ -166,7 +166,7 @@ function registerIpc(): void {
   handle('approveDraft', (id: string, text?: string) => monitor.approve(id, text));
   handle('rejectDraft', (id: string) => monitor.reject(id));
   handle('sendManual', (chat: string, text: string) => monitor.sendManual(chat, text));
-  handle('syncHistory', (chat: string) => monitor.syncHistory(chat));
+  handle('syncHistory', (chat: string, opts?: SyncOptions) => monitor.syncHistory(chat, opts));
   handle('addChat', (chat: string) => monitor.addChat(chat));
   handle('generateReply', (chat: string, agent?: string) => monitor.generateReply(chat, agent));
   handle('setChatMode', (chat: string, mode: ReplyMode | 'inherit') => store.setMode(chat, mode));

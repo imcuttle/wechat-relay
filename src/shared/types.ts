@@ -384,6 +384,17 @@ export interface PersonaOptions {
   fetch: boolean;
 }
 
+export interface SyncOptions {
+  /** Only messages of the last N minutes; 0 = no time limit (scroll to the top or until `limit`). */
+  minutes: number;
+  /** At most this many (most recent) messages. */
+  limit: number;
+  /** Save crops of image messages (else they stay as「[图片]」+ OCR text). */
+  images: boolean;
+  /** Keep stored messages older than what was read instead of dropping them. */
+  keepOlder: boolean;
+}
+
 export interface ChatSummary {
   name: string;
   isGroup: boolean;
@@ -494,7 +505,7 @@ export interface RelayApi {
   rejectDraft(id: string): Promise<void>;
   sendManual(chat: string, text: string): Promise<void>;
   /** Adds a chat to the records and, when it is in WeChat's session list, reads its visible messages. */
-  syncHistory(chat: string): Promise<{ count: number; scrolls: number; reachedTop: boolean }>;
+  syncHistory(chat: string, opts?: SyncOptions): Promise<{ count: number; scrolls: number; reachedTop: boolean }>;
   addChat(chat: string): Promise<{ synced: boolean; message: string }>;
   /** Runs an agent on the stored history of `chat` and returns its reply without sending (agent: id, or by rule). */
   generateReply(chat: string, agent?: string): Promise<{ text: string | null; agent: string; reason?: string; ms: number }>;

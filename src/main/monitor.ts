@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { casesText, personaPromptId, promptText } from '@shared/prompt';
-import type { AppConfig, ChatMessage, Draft, MonitorStatus, PersonaOptions, PromptConfig, RuleConfig, VisionMessage } from '@shared/types';
+import type { AppConfig, ChatMessage, Draft, MonitorStatus, PersonaOptions, PromptConfig, RuleConfig, SyncOptions, VisionMessage } from '@shared/types';
 import { AudioRig, VoiceFailed, VoiceUnavailable } from './audio';
 import { completeText, runAgent } from './agent/engine';
 import { noteMessages } from './agent/dream';
@@ -11,7 +11,7 @@ import { CACHE_DIR, CONFIG_PATH, MEDIA_DIR } from './config';
 import { CuaDriver } from './driver';
 import { NOTICE_SENDER, isNotice, patsMe } from './notice';
 import { matchRule } from './rules';
-import { dropImages, store } from './store';
+import { MAX_PER_CHAT, dropImages, store } from './store';
 import { parseWxTime, stamp } from './timeline';
 import { errText, isNoiseText, logger, sleep } from './util';
 import { Vision } from './vision';
@@ -646,35 +646,46 @@ export class Monitor extends EventEmitter {
   }
 
   /**
-   * Rebuilds a chat's stored history from WeChat itself (see readChat) over the last `historyMinutes` minutes and
-   * replaces the records with what was read. Bot tags and send times of messages we already knew are kept.
+   * Rebuilds a chat's stored history from WeChat itself (see readChat) over the last `minutes` minutes (default: the
+   * historyMinutes setting), at most `limit` messages, and replaces the records with what was read (`keepOlder` keeps
+   * the stored messages before that). Bot tags and send times of messages we already knew are kept.
    */
-  syncHistory(chat: string): Promise<{ count: number; scrolls: number; reachedTop: boolean }> {
+  syncHistory(chat: string, opts?: SyncOptions): Promise<{ count: number; scrolls: number; reachedTop: boolean }> {
     const name = store.summaries().find((c) => sameChat(c.name, chat))?.name ?? chat;
     if (!store.chat(name)) throw new Error(`没有「${chat}」的会话记录`);
+    const minutes = Math.max(0, Math.floor(opts?.minutes ?? this.cfg.general.historyMinutes) || 0);
+    // The store keeps at most MAX_PER_CHAT messages per chat: reading more would be thrown away.
+    const max = Math.max(10, Math.min(MAX_PER_CHAT, Math.floor(opts?.limit ?? SYNC_MAX) || SYNC_MAX));
+    // Roughly 4+ new messages per scroll step; never fewer steps than the default.
+    const steps = Math.min(400, Math.max(SYNC_STEPS, Math.ceil(max / 4)));
     return this.lock.run(async () => {
-      const { read, scrolls, reachedTop, isGroup, now } = await this.readChat(name, { minutes: this.cfg.general.historyMinutes, max: SYNC_MAX, steps: SYNC_STEPS, images: true });
+      const { read, scrolls, reachedTop, isGroup, now } = await this.readChat(name, { minutes, max, steps, images: opts?.images ?? true });
 
       // Keep what we already knew about a message: it was sent by the bot, and when it was first seen.
       const stored = store.history(name);
       const same = (a: ChatMessage, b: ChatMessage) => a.side === b.side && normText(a.text) !== '' &&
         (normText(a.text) === normText(b.text) || similarity(a.text, b.text) >= 0.8);
-      let j = 0;
+      let j = 0, first = -1;
       for (const m of read) {
         const k = stored.findIndex((x, i) => i >= j && same(x, m));
         if (k < 0) continue;
+        if (first < 0) first = k;
         j = k + 1;
         if (stored[k].source === 'bot') m.source = 'bot';
         if (m.at === now) m.at = stored[k].at;
+        // Read without images: keep the crop we already had for this message.
+        if (!m.image && stored[k].image) Object.assign(m, { kind: 'image', image: stored[k].image, checked: stored[k].checked });
       }
       this.tagBot(name, read);
       for (let i = read.length - 2; i >= 0; i--) read[i].at = Math.min(read[i].at, read[i + 1].at);
 
+      // Stored messages before the first one read again (or, without any match, older than everything read).
+      const older = !opts?.keepOlder ? [] : first >= 0 ? stored.slice(0, first) : stored.filter((m) => m.at < read[0].at);
       store.ensure(name, isGroup);
-      store.replace(name, read);
+      store.replace(name, [...older, ...read]);
       this.needBackfill.delete(name);
       this.emit('chat', name);
-      log.info(`「${name}」历史同步完成：${read.length} 条（滚动 ${scrolls} 次${reachedTop ? '，已到顶部' : ''}）`);
+      log.info(`「${name}」历史同步完成：${read.length} 条${older.length ? `，保留更早的 ${older.length} 条` : ''}（滚动 ${scrolls} 次${reachedTop ? '，已到顶部' : ''}）`);
       return { count: read.length, scrolls, reachedTop };
     });
   }

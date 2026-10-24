@@ -5,7 +5,7 @@ import { DATA_DIR } from './config';
 import { isNoiseText } from './util';
 
 const FILE = join(DATA_DIR, 'state.json');
-const MAX_PER_CHAT = 300;
+export const MAX_PER_CHAT = 300;
 
 export function dropImages(msgs: ChatMessage[]): void {
   for (const m of msgs) if (m.image) rmSync(m.image, { force: true });

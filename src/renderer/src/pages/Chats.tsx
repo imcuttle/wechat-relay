@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { App, Button, Checkbox, Divider, Dropdown, Empty, Image, Input, List, Popover, Select, Space, Switch, Tag, Tooltip, Typography } from 'antd';
 import { CheckSquare, Ellipsis, ListChecks, MessagesSquare, Plus, RefreshCw, Send, Sparkles, ThumbsDown, ThumbsUp, Trash, UserRound } from 'lucide-react';
-import type { ChatMessage, ChatSummary, Persona, PromptCase, ReplyMode } from '@shared/types';
+import type { ChatMessage, ChatSummary, Persona, PromptCase, ReplyMode, SyncOptions } from '@shared/types';
 import { applyCase, CaseModal, CasesModal, KIND_LABEL, type CaseDraft, type CaseKind } from '../components/CaseModal';
 import PersonaModal from '../components/PersonaModal';
+import SyncModal from '../components/SyncModal';
 import { errMsg, useRelay } from '../relay';
 
 const MODE_TAG: Record<ReplyMode, string> = { review: '审核', auto: '自动' };
@@ -33,6 +34,7 @@ export default function Chats() {
   const [newChat, setNewChat] = useState('');
   const [adding, setAdding] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [syncOpen, setSyncOpen] = useState(false);
   const [agent, setAgent] = useState<string>('');
   const [generating, setGenerating] = useState(false);
   const [personaOpen, setPersonaOpen] = useState(false);
@@ -82,13 +84,14 @@ export default function Chats() {
     finally { setGenerating(false); }
   };
 
-  const sync = async () => {
+  const sync = async (opts: SyncOptions) => {
     if (!active) return;
+    const chat = active;
     setSyncing(true);
     try {
-      const r = await window.relay.syncHistory(active);
-      message.success(`已同步 ${r.count} 条`);
-      setHistory(await window.relay.getHistory(active));
+      const r = await window.relay.syncHistory(chat, opts);
+      message.success(`已同步 ${r.count} 条${r.reachedTop ? '（已到会话顶部）' : ''}`);
+      if (activeRef.current === chat) setHistory(await window.relay.getHistory(chat));
       setChats(await window.relay.getChats());
     } catch (e) { message.error(errMsg(e)); }
     finally { setSyncing(false); }
@@ -268,7 +271,7 @@ export default function Chats() {
                     { key: 'delete', icon: <Trash size={14} />, label: '删除会话', danger: true },
                   ],
                   onClick: ({ key }) => {
-                    if (key === 'sync') modal.confirm({ title: '同步历史？', content: '在后台打开该会话并向上滚动，读取「上下文时间」（设置里可改，默认 10 分钟）内的消息，用读取结果重建本地记录（不会前置微信）。', okText: '同步', cancelText: '取消', onOk: () => { void sync(); } });
+                    if (key === 'sync') setSyncOpen(true);
                     if (key === 'clear') modal.confirm({ title: '清空本地记录？', content: '只删除聊天记录，会话的发送方式和人设保留，不影响微信。', okText: '清空', okButtonProps: { danger: true }, cancelText: '取消',
                       onOk: () => window.relay.clearHistory(current.name).then(() => { setActive(null); return refreshChats(); }) });
                     if (key === 'delete') confirmDelete([current.name]);
@@ -334,6 +337,7 @@ export default function Chats() {
         ) : <Empty style={{ marginTop: 120 }} description="选择左侧会话查看记录" />}
       </div>
       {current && <PersonaModal chat={current.name} open={personaOpen} onClose={() => setPersonaOpen(false)} onChanged={() => { void refreshChats(); loadPersona(); }} />}
+      {current && <SyncModal chat={current.name} open={syncOpen} onClose={() => setSyncOpen(false)} onSync={(o) => { void sync(o); }} />}
       <CasesModal open={casesOpen} persona={persona} onClose={() => setCasesOpen(false)} onEdit={setCaseDraft} onChange={saveCases} />
       <CaseModal draft={caseDraft} onCancel={() => setCaseDraft(null)} onSave={saveCase} />
     </div>
