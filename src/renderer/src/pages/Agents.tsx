@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { App, Button, Card, Col, Form, Image, Input, InputNumber, Row, Select, Space, Switch, Tag, Typography, Upload } from 'antd';
+import { App, Button, Card, Col, Form, Image, Input, InputNumber, Row, Select, Space, Switch, Tag, Tooltip, Typography, Upload } from 'antd';
 import { Bot, ImagePlus, Play, Plus, Trash, X } from 'lucide-react';
 import { BUILTIN_TOOLS, builtinEnabled } from '@shared/builtins';
 import type { AgentConfig, DebugSection, TestAgentResult } from '@shared/types';
@@ -122,6 +122,7 @@ function TestPanel() {
   const [agent, setAgent] = useState<string | undefined>(config?.agents[0]?.id);
   const [chat, setChat] = useState('测试好友');
   const [isGroup, setIsGroup] = useState(false);
+  const [ask, setAsk] = useState(false);
   const [msgs, setMsgs] = useState<TestMsg[]>([{ side: 'other', text: '在吗？周末有空一起吃饭不' }]);
   const [result, setResult] = useState<TestAgentResult | null>(null);
   const [busy, setBusy] = useState(false);
@@ -136,7 +137,7 @@ function TestPanel() {
   const run = async () => {
     if (!agent) return;
     setBusy(true); setResult(null);
-    try { setResult(await window.relay.testAgent({ agent, chat, isGroup, messages: msgs })); } catch (e) { message.error(errMsg(e)); } finally { setBusy(false); }
+    try { setResult(await window.relay.testAgent({ agent, chat, isGroup, messages: msgs, ask })); } catch (e) { message.error(errMsg(e)); } finally { setBusy(false); }
   };
 
   return (
@@ -147,6 +148,7 @@ function TestPanel() {
             <Select style={{ width: 180 }} value={agent} onChange={setAgent} options={config?.agents.map((a) => ({ value: a.id, label: a.name || a.id }))} />
             <Input style={{ width: 140 }} value={chat} onChange={(e) => setChat(e.target.value)} addonBefore="会话" />
             <Space size={4}>群聊<Switch size="small" checked={isGroup} onChange={setIsGroup} /></Space>
+            <Tooltip title="给智能体 AskUserQuestion 工具，会真的弹出询问窗口"><Space size={4}>询问我<Switch size="small" checked={ask} onChange={setAsk} /></Space></Tooltip>
           </Space>
           {msgs.map((m, i) => (
             <div key={i} style={{ marginBottom: 6 }}>

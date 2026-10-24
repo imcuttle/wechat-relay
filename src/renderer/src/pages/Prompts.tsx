@@ -2,6 +2,7 @@ import { Alert, Button, Collapse, Form, Input, Space, Tag, Typography } from 'an
 import { FileText, Plus, Trash } from 'lucide-react';
 import { promptText } from '@shared/prompt';
 import type { PromptCase, PromptConfig } from '@shared/types';
+import { AskPromptCard } from '../components/AskPrompt';
 import CodeEditor from '../components/CodeEditor';
 import ConfigList from '../components/ConfigList';
 
@@ -50,6 +51,7 @@ export default function Prompts() {
           好例 / 反例会按固定格式追加在正文后面；会话人设的示例也可以在「会话记录」里勾选消息标注。
         </span>
       } />
+      <AskPromptCard />
       <ConfigList
         listKey="prompts"
         title="提示词模板"

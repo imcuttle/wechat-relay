@@ -28,6 +28,10 @@ export const CONFIG_DOCS: Record<string, SectionDoc> = {
       historyLimit: { type: '条数', def: '30', desc: '给智能体的上下文最多多少条消息。超出时一次丢掉较早的一半，之后只追加，这样提示词缓存能持续命中。' },
       historyMinutes: { type: '分钟', def: '10', desc: '上下文只保留最近多少分钟的消息；「同步历史」也只读取这段时间内的消息。会话第一次出现时会在后台向上滚动读取。', values: { '0': '不限时间，也不向上滚动读取' } },
       imageMaxSize: { type: '像素', def: '768', desc: '聊天里的图片裁剪后压缩到的最长边。越大越清晰，但占空间、发给模型更费 token。' },
+      askUser: { type: 'true / false', def: 'false', desc: '允许智能体用 AskUserQuestion 弹出全局窗口询问你（Esc 不回答、数字键选择、点击或自由输入）。参数与 CodeBuddy 的 AskUserQuestion 一致；codebuddy harness 走 ACP 原生工具，其他走内置工具。可在「会话记录」里按会话单独开关。开启记忆时，提示词会引导把你回答的长期偏好记进记忆。' },
+      askTimeoutSec: { type: '秒', def: '10', desc: '弹窗多少秒内没有任何操作就自动关闭：询问视为不回答，草稿留在「待审核」。按键或点击后倒计时停止。' },
+      askPrompt: { type: '文本', def: '空（使用内置引导）', desc: '开启询问时加进系统提示词的引导，决定智能体什么时候该问你。默认：回复需要的事实在聊天记录 / 记忆里找不到、也无法确定时才问。可用 {{myNickname}} {{chat}} {{askTimeoutSec}}，{{#memory}}…{{/memory}} 只在开启记忆时出现。' },
+      reviewPopup: { type: 'true / false', def: 'false', desc: '待审核的草稿也弹出全局窗口审批：回车发送、E 编辑、Esc 不发送、L 稍后。' },
     },
   },
   driver: {
@@ -54,18 +58,19 @@ export const CONFIG_DOCS: Record<string, SectionDoc> = {
     fields: {
       id: { type: '字符串', desc: '唯一标识。' },
       name: { type: '字符串', desc: '界面显示名称（可选）。' },
-      type: { type: '字符串', desc: '代理类型。', values: { codebuddy: 'CodeBuddy Code（无头 -p 模式）', 'claude-code': 'Claude Code（无头 -p 模式）', command: '任意命令行程序：从标准输入读提示词，把回复打印到标准输出' } },
-      command: { type: '命令', desc: '可执行文件名或路径，例如 codebuddy、claude。' },
+      type: { type: '字符串', desc: '代理类型。', values: { codebuddy: 'CodeBuddy Code，以 codebuddy --acp 通过 ACP 对接', acp: '任意通过 stdio 说 ACP 的命令，例如 npx -y @agentclientprotocol/claude-agent-acp（Claude Code）', command: '任意命令行程序：从标准输入读提示词，把回复打印到标准输出' } },
+      command: { type: '命令', desc: '可执行文件名或路径，例如 codebuddy、npx。' },
       args: { type: '列表', desc: '附加命令行参数。' },
-      model: { type: '字符串', desc: '指定模型（可选，不填用代理默认值）。' },
+      model: { type: '字符串', desc: '指定模型（可选，不填用代理默认值；acp 类型不使用，请在命令参数里设置）。' },
       cwd: { type: '路径', desc: '运行命令的工作目录（可选）。' },
       env: { type: '键值', desc: '额外的环境变量（可选）。' },
-      timeoutMs: { type: '毫秒', def: '180000', desc: '超过这个时间还没返回就放弃本次回复。' },
-      sessionPerChat: { type: 'true / false', desc: '每个微信会话使用独立的代理会话，让它记住上下文（仅 codebuddy / claude-code）。' },
-      passMcpServers: { type: 'true / false', desc: '把智能体启用的 MCP 服务通过 --mcp-config 传给代理。' },
-      toolProxy: { type: 'true / false', def: 'true', desc: '在本机起一个代理 MCP 服务，把智能体的内置工具、自定义工具（命令 / TypeScript）以及记忆、skill 用的文件工具传给代理（仅 codebuddy / claude-code）。' },
+      timeoutMs: { type: '毫秒', def: '180000', desc: '单次回复超过这个时间还没返回就取消（session/cancel）并放弃。' },
+      sessionPerChat: { type: 'true / false', desc: '每个微信会话保持一个 ACP 会话，之后只发新消息；进程退出后用 session/load 恢复（仅 codebuddy / acp）。' },
+      idleMinutes: { type: '分钟', def: '10', desc: '每个微信会话一个常驻 ACP 进程，这么久没有新消息就结束它（仅 codebuddy / acp）。', values: { '0': '每次回复后就结束' } },
+      passMcpServers: { type: 'true / false', desc: '把智能体启用的 MCP 服务通过 ACP session/new 的 mcpServers 传给代理。' },
+      toolProxy: { type: 'true / false', def: 'true', desc: '在本机起一个代理 MCP 服务，把智能体的内置工具、自定义工具（命令 / TypeScript）传给代理（仅 codebuddy / acp）。' },
       disableNativeMemory: { type: 'true / false', def: 'true', desc: '关闭代理自带的 Auto Memory（设置 CODEBUDDY_DISABLE_AUTO_MEMORY / CLAUDE_CODE_DISABLE_AUTO_MEMORY），统一使用 ~/.wechat-relay/memory。' },
-      prewarm: { type: 'true / false', def: 'true', desc: '提前启动一个 codebuddy --prewarm 待命进程（完成冷启动、登录、MCP 发现），回复时再绑定 cwd 和参数，省去约 5 秒的启动时间（仅 codebuddy）。每个预热进程只用一次，用完自动补一个。' },
+      prewarm: { type: 'true / false', def: 'true', desc: '提前启动一个 codebuddy --acp --prewarm 待命进程（完成冷启动、登录、MCP 发现），需要新的 ACP 进程时再绑定 cwd 和参数，省去约 5 秒的启动时间（仅 codebuddy）。每个预热进程只用一次，用完自动补一个。' },
     },
   },
   builtinTools: {
@@ -100,7 +105,7 @@ export const CONFIG_DOCS: Record<string, SectionDoc> = {
     },
   },
   memory: {
-    title: '记忆', desc: '跨消息的长期记忆。开启后系统提示词会附带全局记忆索引和读写路径说明，并自动给智能体开放只限 ~/.wechat-relay/memory 与 skills 目录的文件工具；记忆文件是普通 Markdown，一行一条。',
+    title: '记忆', desc: '跨消息的长期记忆。开启后系统提示词会附带全局记忆索引和读写路径说明，并自动给智能体开放只限 ~/.wechat-relay/memory 与 skills 目录的文件工具和沙箱 Bash；记忆文件是普通 Markdown，一行一条。',
     fields: {
       enabled: { type: 'true / false', def: 'false', desc: '记忆总开关（与 Skill 互相独立）。' },
       indexLimit: { type: '条数', def: '12', desc: '系统提示词里列出多少条全局记忆（按优先级、时间排序）。会话记忆不列出，需要时让智能体读文件或 grep。' },
@@ -109,7 +114,7 @@ export const CONFIG_DOCS: Record<string, SectionDoc> = {
     },
   },
   skillsEnabled: {
-    title: 'Skill 总开关', desc: 'true / false，默认 false。与记忆互相独立：开启后系统提示词带 skill 索引与路径说明，并开放只限 ~/.wechat-relay/skills 的文件工具。', fields: {},
+    title: 'Skill 总开关', desc: 'true / false，默认 false。与记忆互相独立：开启后系统提示词带 skill 索引与路径说明，并开放只限 ~/.wechat-relay/skills 的文件工具和沙箱 Bash（可运行 skill 里的脚本）。', fields: {},
   },
   skills: {
     title: 'Skill', desc: '可复用的操作指引（SKILL.md），文件在 ~/.wechat-relay/skills。此处只记录启用开关和初始内容；文件已存在时以磁盘为准。', list: true,

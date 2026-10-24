@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Alert, Button, Card, Form, Input, InputNumber, Select, Space, Switch, Tag, Typography, type FormInstance } from 'antd';
 import { ListFilter, Save } from 'lucide-react';
 import type { ChatSummary, RuleConfig } from '@shared/types';
+import { AskPromptButton } from '../components/AskPrompt';
 import ConfigList from '../components/ConfigList';
 import { useRelay } from '../relay';
 
@@ -161,7 +162,7 @@ function GeneralSettings() {
   const g = config.general;
   return (
     <ConfigCard title="全局设置" onSave={async () => {
-      const { delayMin, delayMax, foregroundSend, ...rest } = await form.validateFields();
+      const { delayMin, delayMax, foregroundSend, askUser: _a, askPrompt: _p, ...rest } = await form.validateFields();
       await saveConfig((c) => {
         c.general = { ...c.general, ...rest, replyDelayMs: [delayMin, Math.max(delayMin, delayMax)] };
         c.driver = { ...c.driver, deliveryMode: foregroundSend ? 'foreground' : 'background' };
@@ -180,6 +181,9 @@ function GeneralSettings() {
         <Form.Item name="restoreChat" label="处理后切回原会话" valuePropName="checked"><Switch /></Form.Item>
         <Form.Item name="foregroundSend" label="前台快速发送" valuePropName="checked" tooltip="始终先在后台发送；只有后台输入没生效、或会话需要搜索时，才等你键鼠空闲 3 秒，把微信短暂切到前台，用快捷键搜索、粘贴并校验后发送，再恢复剪贴板并切回原来的应用。不移动鼠标"><Switch /></Form.Item>
         <Form.Item name="restoreClipboard" label="发送后恢复剪贴板" valuePropName="checked"><Switch /></Form.Item>
+        <Form.Item name="reviewPopup" label="弹窗审批草稿" valuePropName="checked" tooltip="「审核后发送」生成的草稿也弹出全局窗口：回车发送、E 编辑、Esc 不发送、L 稍后（留在「待审核」）"><Switch /></Form.Item>
+        <Form.Item label="询问引导" tooltip="什么时候该问你：默认是回复需要的事实在聊天记录 / 记忆里找不到、也无法确定时才问。也可在「提示词」页修改"><AskPromptButton /></Form.Item>
+        <Form.Item name="askTimeoutSec" label="弹窗等待(秒)" tooltip="弹窗多少秒内没有任何操作就自动关闭：询问视为不回答，草稿留在「待审核」。一旦按键或点击，倒计时停止"><InputNumber min={3} max={600} /></Form.Item>
       </Form>
     </ConfigCard>
   );

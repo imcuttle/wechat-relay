@@ -25,3 +25,4 @@ body { background: #f5f6f8; -webkit-font-smoothing: antialiased; }
 .chat-title { flex: 1 1 140px; min-width: 0; display: flex; align-items: center; gap: 8px; }
 .chat-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; margin-left: auto; }
 .pick-bar { margin: 0 12px 8px; padding: 6px 10px; background: #fafafa; border: 1px solid #f0f0f0; border-radius: 6px; display: flex; align-items: center; gap: 8px; }
+.popup body { background: transparent; overflow: hidden; }

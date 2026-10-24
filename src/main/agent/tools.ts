@@ -3,7 +3,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { builtinEnabled } from '@shared/builtins';
-import type { AgentConfig, AppConfig, ChatMessage, McpServerConfig, ToolConfig } from '@shared/types';
+import type { AgentConfig, AppConfig, AskAnswers, AskQuestion, ChatMessage, McpServerConfig, ToolConfig } from '@shared/types';
 import { expandEnv, knowledgeDirs } from '../config';
 import { errText, logger } from '../util';
 import { BUILTINS, runProcess, scopedFileTools } from './builtins';
@@ -12,7 +12,11 @@ import { prepareScriptTool, runScriptTool } from './scriptTools';
 const log = logger.scope('tools');
 
 export interface ToolDef { name: string; description: string; parameters: Record<string, unknown> }
-export interface ToolCtx { chat: string; isGroup: boolean; history: ChatMessage[]; skipped: { reason?: string } | null }
+export interface ToolCtx {
+  chat: string; isGroup: boolean; history: ChatMessage[]; skipped: { reason?: string } | null;
+  /** AskUserQuestion popup of this run (absent = asking is off); closes when `signal` aborts. */
+  ask?: (questions: AskQuestion[], signal?: AbortSignal) => Promise<AskAnswers>;
+}
 export interface ToolImpl extends ToolDef { run(args: Record<string, unknown>, ctx: ToolCtx): Promise<string> }
 
 const shellQuote = (v: unknown) => `'${String(typeof v === 'object' ? JSON.stringify(v) : v ?? '').replace(/'/g, `'\\''`)}'`;

@@ -1,7 +1,8 @@
-import { useEffect, useRef } from 'react';
+import { useContext, useEffect, useRef } from 'react';
 import Editor, { loader, type EditorProps } from '@monaco-editor/react';
 import * as monaco from 'monaco-editor';
 import { docAt, docMarkdown, keysAt } from '@shared/fieldDocs';
+import { PageVisit } from '../pageVisit';
 import EditorWorker from 'monaco-editor/editor/editor.worker?worker';
 import JsonWorker from 'monaco-editor/language/json/json.worker?worker';
 import TsWorker from 'monaco-editor/language/typescript/ts.worker?worker';
@@ -67,6 +68,8 @@ export default function CodeEditor({ value, onChange, language = 'plaintext', he
   const readyRef = useRef(onReady);
   saveRef.current = onSave;
   readyRef.current = onReady;
+  // Hiding the keep-alive page disposed the editor while @monaco-editor/react still holds it as ready: a fresh one on every show.
+  const visit = useContext(PageVisit);
   useEffect(() => {
     alive.current = true;
     return () => { alive.current = false; readyRef.current?.(null); };
@@ -74,6 +77,7 @@ export default function CodeEditor({ value, onChange, language = 'plaintext', he
   return (
     <div style={{ border: '1px solid #e5e7eb', borderRadius: 6, overflow: 'hidden', height }}>
       <Editor
+        key={visit}
         value={value ?? ''}
         language={language}
         height="100%"

@@ -212,7 +212,7 @@ export default function Chats() {
             >
               {picking && <Checkbox checked={picked.has(c.name)} style={{ marginRight: 10 }} />}
               <List.Item.Meta
-                title={<Space size={4}>{c.name}{c.isGroup && <Tag color="blue">群</Tag>}{c.paused && <Tag>已暂停</Tag>}{c.mode !== 'inherit' && <Tag color={c.mode === 'auto' ? 'orange' : 'green'}>{MODE_TAG[c.mode]}</Tag>}{c.persona?.enabled && <Tooltip title={config?.prompts.find((p) => p.id === c.persona!.prompt)?.name || c.persona.prompt}><Tag color="purple">人设</Tag></Tooltip>}</Space>}
+                title={<Space size={4}>{c.name}{c.isGroup && <Tag color="blue">群</Tag>}{c.paused && <Tag>已暂停</Tag>}{c.mode !== 'inherit' && <Tag color={c.mode === 'auto' ? 'orange' : 'green'}>{MODE_TAG[c.mode]}</Tag>}{c.ask !== 'inherit' && <Tag color={c.ask === 'on' ? 'cyan' : 'default'}>{c.ask === 'on' ? '询问' : '不询问'}</Tag>}{c.persona?.enabled && <Tooltip title={config?.prompts.find((p) => p.id === c.persona!.prompt)?.name || c.persona.prompt}><Tag color="purple">人设</Tag></Tooltip>}</Space>}
                 description={<Typography.Text type="secondary" ellipsis style={{ fontSize: 12, maxWidth: 220 }}>{c.lastText}</Typography.Text>}
               />
             </List.Item>
@@ -233,6 +233,11 @@ export default function Chats() {
                   <Select size="small" style={{ width: 128 }} value={current.mode} prefix={<span style={{ color: '#999' }}>发送</span>}
                     onChange={(v) => void window.relay.setChatMode(current.name, v).then(refreshChats)}
                     options={[{ value: 'inherit', label: '跟随默认', title: '' }, { value: 'review', label: '审核后', title: '' }, { value: 'auto', label: '自动', title: '' }]} />
+                </Tooltip>
+                <Tooltip title="该会话是否允许智能体用 AskUserQuestion 弹窗问你，优先级高于全局设置">
+                  <Select size="small" style={{ width: 118 }} value={current.ask} prefix={<span style={{ color: '#999' }}>询问</span>}
+                    onChange={(v) => void window.relay.setChatAsk(current.name, v).then(refreshChats)}
+                    options={[{ value: 'inherit', label: `默认·${config?.general.askUser ? '开' : '关'}`, title: '' }, { value: 'on', label: '开', title: '' }, { value: 'off', label: '关', title: '' }]} />
                 </Tooltip>
                 <Space.Compact size="small">
                   <Select size="small" style={{ width: 176 }} value={personaValue} popupMatchSelectWidth={280}

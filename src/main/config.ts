@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, watchFile, writeFileSync } from 'n
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import YAML from 'yaml';
-import type { AppConfig, VoiceConfig } from '@shared/types';
+import type { AppConfig, HarnessConfig, VoiceConfig } from '@shared/types';
 import { BUILTIN_TOOLS } from '@shared/builtins';
 
 export const DATA_DIR = process.env.WECHAT_RELAY_HOME || join(homedir(), '.wechat-relay');
@@ -37,6 +37,10 @@ general:
   historyLimit: 30          # 给智能体的上下文最多条数（超出时一次丢弃较早的一半，之后只追加，保持提示词缓存命中）
   historyMinutes: 10        # 上下文最早消息的时间上限（同样批量丢弃）；会话首次出现时会在后台向上滚动读取（0 = 不限时间，也不滚动读取）
   imageMaxSize: 768         # 聊天图片裁剪后压缩到的最长边（像素）
+  askUser: false            # 允许智能体用 AskUserQuestion 弹窗询问你（可在「会话记录」里按会话单独开关）
+  askTimeoutSec: 10         # 弹窗等待的秒数（开始操作后停止倒计时）：询问超时视为不回答，审批超时草稿留在「待审核」
+  askPrompt: ""             # 开启询问时加进系统提示词的引导（空 = 内置默认：事实不清楚时才问），可用 {{myNickname}} {{chat}} {{askTimeoutSec}} {{#memory}}…{{/memory}}
+  reviewPopup: false        # 待审核的草稿也用全局弹窗审批（发送 / 编辑 / 拒绝）
 
 driver:
   command: auto             # auto = 使用 CodeBuddy 内置的 cua-driver
@@ -61,23 +65,25 @@ providers:
     baseUrl: http://127.0.0.1:11434/v1
     apiKey: ollama
 
-harnesses:
+harnesses:                  # 通过 ACP（Agent Client Protocol）对接，每个微信会话一个常驻进程
   - id: codebuddy
-    type: codebuddy
+    type: codebuddy           # 自动加 --acp
     command: codebuddy
     args: []
     timeoutMs: 180000
     sessionPerChat: true
+    idleMinutes: 10           # 会话这么久没有新消息就结束进程（0 = 每次回复后结束）
     passMcpServers: true
     toolProxy: true
     disableNativeMemory: true
-    prewarm: true
+    prewarm: true             # 预热 codebuddy --acp --prewarm 待命进程
   - id: claude-code
-    type: claude-code
-    command: claude
-    args: []
+    type: acp                 # 任意 ACP 命令
+    command: npx
+    args: [-y, "@agentclientprotocol/claude-agent-acp"]
     timeoutMs: 180000
     sessionPerChat: true
+    idleMinutes: 10
     passMcpServers: true
     toolProxy: true
     disableNativeMemory: true
@@ -100,12 +106,12 @@ mcpServers:
     args: [mcp-server-fetch]
 
 memory:
-  enabled: false            # 记忆总开关：开启后系统提示词带「全局记忆索引」和读写说明，智能体可用文件工具读写 ~/.wechat-relay/memory
+  enabled: false            # 记忆总开关：开启后系统提示词带「全局记忆索引」和读写说明，智能体可用文件工具和沙箱 Bash 读写 ~/.wechat-relay/memory
   indexLimit: 12            # 提示词里最多列几条全局记忆（会话记忆不列出，但可用 grep / read 查到）
   dreamEveryMessages: 100   # 每个会话新增这么多条消息后自动「做梦」整理记忆；0 = 只手动
   # dreamAgent: assistant   # 做梦使用的智能体，默认第一个
 
-skillsEnabled: false        # Skill 总开关（与记忆互相独立）：开启后提示词带 skill 索引和路径说明
+skillsEnabled: false        # Skill 总开关（与记忆互相独立）：开启后提示词带 skill 索引和路径说明，智能体可用文件工具和沙箱 Bash 读写 ~/.wechat-relay/skills
 skills: []                  # 在「Skill」页管理；文件在 ~/.wechat-relay/skills，这里只保存各 skill 的启用开关和初始内容
 
 prompts:
@@ -174,6 +180,12 @@ const DEFAULT_VOICE: VoiceConfig = {
   maxChars: 120, maxSeconds: 45, virtualDevice: 'BlackHole', buttonOffset: 47, timeoutMs: 60000,
 };
 
+/** Claude Code has no ACP mode of its own: the old headless `claude-code` type becomes the ACP adapter. */
+function migrateHarness(h: HarnessConfig): HarnessConfig {
+  if ((h.type as string) !== 'claude-code') return h;
+  return { ...h, type: 'acp', command: 'npx', args: ['-y', '@agentclientprotocol/claude-agent-acp'] };
+}
+
 function normalize(raw: Partial<AppConfig> | null | undefined): AppConfig {
   const c = (raw ?? {}) as Partial<AppConfig>;
   const arr = <T>(v: T[] | undefined): Partial<T>[] => (Array.isArray(v) ? v : []);
@@ -182,7 +194,7 @@ function normalize(raw: Partial<AppConfig> | null | undefined): AppConfig {
     general: { ...DEFAULTS.general, ...(c.general ?? {}) },
     driver: { ...DEFAULTS.driver, ...(c.driver ?? {}) },
     providers: withDefaults(arr(c.providers), { type: 'openai', apiKey: '' }),
-    harnesses: withDefaults(arr(c.harnesses), { args: [], timeoutMs: 180000, sessionPerChat: true, passMcpServers: true, toolProxy: true, disableNativeMemory: true, prewarm: true }),
+    harnesses: withDefaults(arr(c.harnesses), { args: [], timeoutMs: 180000, sessionPerChat: true, idleMinutes: 10, passMcpServers: true, toolProxy: true, disableNativeMemory: true, prewarm: true }).map(migrateHarness),
     builtinTools: {
       ...Object.fromEntries(BUILTIN_TOOLS.map((b) => [b.id, b.defaultEnabled])),
       ...(c.builtinTools && typeof c.builtinTools === 'object' ? c.builtinTools : {}),

@@ -3,15 +3,17 @@ import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AgentConfig, AppConfig, ChatMessage, DebugSection, HarnessConfig, ProviderConfig } from '@shared/types';
+import type { AgentConfig, AppConfig, ChatMessage, DebugSection, HarnessConfig, PopupLine, ProviderConfig } from '@shared/types';
 import { promptText } from '@shared/prompt';
 import { DATA_DIR, expandEnv, knowledgeDirs, MEDIA_DIR, MEMORY_DIR } from '../config';
 import { dateText, errText, nowText, render, sleep } from '../util';
+import { popup } from '../popup';
+import { acpPool, type AcpSpec } from './acp';
+import { askGuide, askTool } from './ask';
 import { scopedFileTools } from './builtins';
 import { memoryGuide } from './memory';
 import { skillGuide } from './skills';
-import { prewarm, PREWARM_ARGS, type ExecResult, type PrewarmSpec } from './prewarm';
-import { proxy } from './proxy';
+import { prewarm, type PrewarmSpec } from './prewarm';
 import { resolveTools, type ToolCtx, type ToolImpl } from './tools';
 
 export interface AgentInput {
@@ -27,6 +29,8 @@ export interface AgentInput {
   persona?: string;
   /** When set, the full request / response of the run is appended here (debug panel). */
   debug?: DebugSection[];
+  /** The agent may ask the user through the AskUserQuestion popup. */
+  ask?: boolean;
 }
 
 export interface AgentOutput { reply: string | null; skipped: boolean; reason?: string; trace: string[] }
@@ -53,11 +57,16 @@ function systemPrompt(cfg: AppConfig, agent: AgentConfig, input: AgentInput): st
   };
   const base = input.persona?.trim() || (agent.prompt ? promptText(cfg.prompts.find((p) => p.id === agent.prompt)) : '');
   const prompt = render([base, agent.systemPrompt ?? ''].filter((s) => s.trim()).join('\n\n'), vars).trim();
-  // Same text for model and harness agents (Read / Write / Edit / Glob / Grep are native in a harness, scoped tools for a model).
+  // Same text for model and harness agents (Read / Write / Edit / Glob / Grep / Bash are native in a harness, scoped tools for a model).
   // Appended after rendering: memory lines may contain "{{".
   // A custom-command harness has no file tools: no memory guidance for it.
   const noTools = agent.engine === 'harness' && cfg.harnesses.find((x) => x.id === agent.harness)?.type === 'command';
-  return [prompt, input.chat && !noTools ? memoryGuide(cfg, input.chat) : '', input.chat && !noTools ? skillGuide(cfg, input.chat) : ''].filter(Boolean).join('\n\n');
+  return [
+    prompt,
+    input.chat && !noTools ? memoryGuide(cfg, input.chat) : '',
+    input.chat && !noTools ? skillGuide(cfg, input.chat) : '',
+    input.ask && !noTools ? askGuide(cfg, input.chat) : '',
+  ].filter(Boolean).join('\n\n');
 }
 
 const timeNote = () => `[当前时间：${nowText()}]`;
@@ -382,9 +391,6 @@ function anthropicAdapter(p: ProviderConfig, agent: AgentConfig, system: string,
   };
 }
 
-/** harness id + chat → CLI session id, so each chat keeps its own context inside the harness. */
-const harnessSessions = new Map<string, { id: string; started: boolean }>();
-
 /** Env of this process minus variables that would tie a child CodeBuddy / Claude Code to a parent session. */
 function cleanEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
@@ -397,8 +403,8 @@ function cleanEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
 }
 
 /**
- * Runs a CLI; its stdout goes to a temp file, not a pipe: a CLI that calls process.exit() loses whatever is still
- * buffered for a pipe (codebuddy -p --output-format json was cut off at 128 KB once a resumed session grew).
+ * Runs a CLI (custom-command harness); its stdout goes to a temp file, not a pipe: a CLI that calls process.exit()
+ * loses whatever is still buffered for a pipe.
  */
 function exec(cmd: string, args: string[], opts: { cwd: string; env: NodeJS.ProcessEnv; input?: string; timeoutMs: number }): Promise<{ code: number | null; out: string; err: string }> {
   return new Promise((resolve, reject) => {
@@ -422,56 +428,6 @@ function exec(cmd: string, args: string[], opts: { cwd: string; env: NodeJS.Proc
   });
 }
 
-/**
- * Runs the CLI in a prewarmed standby process when one is ready (binding cwd + arguments only now).
- * undefined: no usable standby, the caller cold-starts. The outcome is recorded in the trace and the debug panel.
- */
-async function execPrewarmed(spec: PrewarmSpec, args: string[], timeoutMs: number, trace: string[], debug?: DebugSection[]): Promise<ExecResult | undefined> {
-  const t0 = Date.now();
-  const note = (text: string) => { trace.push(`预热：${text}`); debug?.push({ title: '预热', text }); };
-  const taken = await prewarm.take(spec);
-  if (!taken.standby) { note(`${taken.info}，改为冷启动`); return undefined; }
-  const run = await prewarm.run(taken.standby, spec.cwd, args.slice(PREWARM_ARGS.length), timeoutMs);
-  if (!run.result) { note(`${taken.info}，但激活失败（${run.error}），改为冷启动`); return undefined; }
-  note(`${taken.info}；激活 ${run.activateMs}ms（cwd ${spec.cwd}），从取用到结束共 ${Date.now() - t0}ms`);
-  return run.result;
-}
-
-/** Text of an assistant message in the CLI's JSON output (codebuddy: output_text parts; claude: text blocks). */
-function assistantText(m: any): string | null {
-  if (m?.type !== 'message' && m?.type !== 'assistant') return null;
-  const msg = m.type === 'assistant' ? m.message : m;
-  if (msg?.role !== 'assistant') return null;
-  const c = msg.content;
-  return typeof c === 'string' ? c : Array.isArray(c) ? c.map((b: any) => (b?.type === 'output_text' || b?.type === 'text' ? b.text ?? '' : '')).join('') : null;
-}
-
-/**
- * Reply from `-p --output-format json` output: the result entry, else the last assistant message. Output that is
- * structured but has neither (e.g. truncated) is an error: it must never end up as the reply.
- */
-function parseCliResult(out: string): { text: string; sessionId?: string; error?: string } {
-  const pick = (r: any) => (r && r.type === 'result' ? { text: String(r.result ?? ''), sessionId: r.session_id, error: r.is_error ? String(r.result ?? 'error') : undefined } : null);
-  const fromItems = (items: any[]) => {
-    const found = [...items].reverse().map(pick).find(Boolean);
-    if (found) return found;
-    const last = [...items].reverse().map(assistantText).find((t) => t != null);
-    return last != null ? { text: last } : null;
-  };
-  const raw = out.trim();
-  try {
-    const j = JSON.parse(raw);
-    const r = fromItems(Array.isArray(j) ? j : [j]);
-    if (r) return r;
-  } catch { /* stream-json / plain text / truncated */ }
-  const lines: any[] = [];
-  for (const line of raw.split('\n')) { try { lines.push(JSON.parse(line)); } catch { /* not a JSON line */ } }
-  const r = lines.length ? fromItems(lines) : null;
-  if (r) return r;
-  if (/^[[{]/.test(raw)) return { text: '', error: `无法解析 harness 的 JSON 输出（${raw.length} 字节，可能被截断）：…${raw.slice(-160)}` };
-  return { text: raw };
-}
-
 /** Working directory and environment a harness CLI runs with (shared by cold starts and the prewarmed standby). */
 function harnessRuntime(cfg: AppConfig, h: HarnessConfig): { cwd: string; env: NodeJS.ProcessEnv } {
   const cwd = h.cwd ? expandEnv(h.cwd) : join(DATA_DIR, 'harness', h.id);
@@ -488,88 +444,86 @@ function harnessRuntime(cfg: AppConfig, h: HarnessConfig): { cwd: string; env: N
 /** Only CodeBuddy has `--prewarm`. */
 const prewarmable = (h: HarnessConfig) => h.type === 'codebuddy' && h.prewarm !== false;
 
-/** Keep one prewarmed `codebuddy` standby per eligible harness (call at startup and whenever the config changes). */
-export function syncPrewarm(cfg: AppConfig): void {
+/**
+ * Keep one prewarmed `codebuddy --acp` standby per eligible harness and end ACP processes of removed harnesses
+ * (call at startup and whenever the config changes).
+ */
+export function syncHarnesses(cfg: AppConfig): void {
   const specs: PrewarmSpec[] = cfg.harnesses.filter(prewarmable).map((h) => ({ id: h.id, command: h.command, ...harnessRuntime(cfg, h) }));
   prewarm.sync(specs);
+  acpPool.sync(cfg);
+}
+
+/** Recent messages shown in the popup (the ones being replied to are marked). */
+const POPUP_LINES = 8;
+function popupLines(input: AgentInput): PopupLine[] {
+  const fresh = new Set(input.incoming.map((m) => m.id));
+  const msgs = input.history.slice(-POPUP_LINES);
+  for (const m of input.incoming) if (!msgs.some((x) => x.id === m.id)) msgs.push(m);
+  return msgs.map((m) => ({ who: speaker(m, input.chat, input.isGroup), text: m.text, self: m.side === 'self', isNew: fresh.has(m.id) }));
+}
+
+/** ToolCtx.ask of a run: the popup, closed when `signal` aborts. */
+function askFn(cfg: AppConfig, input: AgentInput): ToolCtx['ask'] {
+  if (!input.ask) return undefined;
+  return (questions, signal) => popup().ask(questions, { chat: input.chat, isGroup: input.isGroup, lines: popupLines(input), timeoutSec: cfg.general.askTimeoutSec, signal });
 }
 
 async function runHarness(cfg: AppConfig, h: HarnessConfig, agent: AgentConfig, system: string, input: AgentInput, limit: number, trace: string[], raw?: string, ctx?: ToolCtx): Promise<string> {
+  if (h.type !== 'command') return runAcp(cfg, h, agent, system, input, limit, trace, raw, ctx);
   const { cwd, env } = harnessRuntime(cfg, h);
   const prompt = raw ?? transcript(input, agent, limit);
-
   const debug = input.debug;
-  if (h.type === 'command') {
-    const args = h.args.map((a) => render(a, { chat: input.chat, system, model: h.model ?? '' }));
-    trace.push(`$ ${h.command} ${args.join(' ')}`);
-    debug?.push({ title: '命令', text: `cd ${cwd}\n${h.command} ${args.join(' ')}` });
-    debug?.push({ title: 'stdin', text: `${system}\n\n${prompt}`, images: promptImages(prompt) });
-    const r = await exec(h.command, args, { cwd, env, input: `${system}\n\n${prompt}`, timeoutMs: h.timeoutMs });
-    debug?.push({ title: `输出（exit ${r.code}）`, text: [r.out, r.err && `stderr:\n${r.err}`].filter(Boolean).join('\n\n') || '(空)' });
-    if (r.code !== 0) throw new Error(`harness exit ${r.code}: ${short(r.err || r.out, 400)}`);
-    return r.out.trim();
-  }
+  const args = h.args.map((a) => render(a, { chat: input.chat, system, model: h.model ?? '' }));
+  trace.push(`$ ${h.command} ${args.join(' ')}`);
+  debug?.push({ title: '命令', text: `cd ${cwd}\n${h.command} ${args.join(' ')}` });
+  debug?.push({ title: 'stdin', text: `${system}\n\n${prompt}`, images: promptImages(prompt) });
+  const r = await exec(h.command, args, { cwd, env, input: `${system}\n\n${prompt}`, timeoutMs: h.timeoutMs });
+  debug?.push({ title: `输出（exit ${r.code}）`, text: [r.out, r.err && `stderr:\n${r.err}`].filter(Boolean).join('\n\n') || '(空)' });
+  if (r.code !== 0) throw new Error(`harness exit ${r.code}: ${short(r.err || r.out, 400)}`);
+  return r.out.trim();
+}
 
-  // codebuddy / claude-code: same headless interface.
-  const args = [...PREWARM_ARGS, '--append-system-prompt', system];
-  if (h.model) args.push('--model', h.model);
+/** ACP MCP server entries (session/new mcpServers) of the agent's enabled mcp:* servers. */
+function acpMcpServers(cfg: AppConfig, agent: AgentConfig): unknown[] {
+  const pairs = (o?: Record<string, string>) => Object.entries(o ?? {}).map(([name, value]) => ({ name, value: expandEnv(value) }));
+  return cfg.mcpServers.filter((x) => x.enabled && agent.tools.includes(`mcp:${x.id}`)).map((s) => (s.url
+    ? { type: 'http', name: s.id, url: expandEnv(s.url), headers: pairs(s.headers) }
+    : { name: s.id, command: s.command, args: s.args ?? [], env: pairs(s.env) }));
+}
+
+/** codebuddy / any ACP agent: one long-lived process + session per chat (see acp.ts). */
+async function runAcp(cfg: AppConfig, h: HarnessConfig, agent: AgentConfig, system: string, input: AgentInput, limit: number, trace: string[], raw?: string, ctx?: ToolCtx): Promise<string> {
+  const { cwd, env } = harnessRuntime(cfg, h);
+  const codebuddy = h.type === 'codebuddy';
+  const task = raw !== undefined;
   // Image crops and the memory / skill files live outside the harness cwd: let its Read / Write / Edit tools reach them.
   const dirs = [...(agent.vision ? [MEDIA_DIR] : []), ...knowledgeDirs(cfg)];
   for (const d of dirs) mkdirSync(d, { recursive: true }); // the CLI refuses --add-dir paths that do not exist
-  if (dirs.length) args.push('--add-dir', ...dirs);
-  const mcpServers: Record<string, unknown> = {};
-  if (h.passMcpServers) {
-    for (const s of cfg.mcpServers.filter((x) => x.enabled && agent.tools.includes(`mcp:${x.id}`))) {
-      mcpServers[s.id] = s.url
-        ? { type: 'http', url: expandEnv(s.url), headers: s.headers }
-        : { command: s.command, args: s.args ?? [], env: s.env ?? {} };
-    }
-  }
-  // Built-in / custom tools of the agent (what the CLI does not have itself) go through the local proxy MCP server.
-  let release = () => {};
-  if (h.toolProxy && ctx && raw === undefined) {
-    const tools = await resolveTools(cfg, agent, { harness: true });
-    if (tools.length) {
-      const reg = await proxy.register({ tools, ctx, trace });
-      release = reg.release;
-      mcpServers.wr = { type: 'http', url: reg.url, headers: { Authorization: `Bearer ${reg.token}` } };
-      trace.push(`proxy tools: ${tools.map((t) => t.name).join(', ')}`);
-    }
-  }
-  if (Object.keys(mcpServers).length) args.push('--mcp-config', JSON.stringify({ mcpServers }));
-  const key = `${h.id}:${input.chat}`;
-  let session = h.sessionPerChat && raw === undefined ? harnessSessions.get(key) : undefined;
-  if (h.sessionPerChat && raw === undefined) {
-    if (!session) { session = { id: randomUUID(), started: false }; harnessSessions.set(key, session); }
-    args.push(...(session.started ? ['--resume', session.id] : ['--session-id', session.id]));
-  } else {
-    args.push('--no-session-persistence');
-  }
-  args.push(...h.args);
-  // With a resumed session the harness already knows the earlier conversation: only send the new messages.
-  const body = session?.started
-    ? `${timeNote()}\n新消息：\n${input.incoming.map((m) => `${speaker(m, input.chat, input.isGroup)}: ${lineText(m, agent)}`).join('\n')}\n\n请直接输出回复正文；不需要回复则只输出 [SKIP]。`
-    : prompt;
-  args.push(body);
-  trace.push(`$ ${prewarmable(h) ? '(预热) ' : ''}${h.command} ${args.slice(0, -1).map((a) => (a.length > 60 ? `'${a.slice(0, 57)}…'` : a)).join(' ')} <prompt>`);
-  if (debug) {
-    const q = (a: string) => (/^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`);
-    debug.push({ title: '命令', text: `cd ${q(cwd)}\n${h.command} ${args.slice(0, -1).map(q).join(' ')} <prompt>` });
-    debug.push({ title: session?.started ? `prompt（续接会话 ${session.id}）` : 'prompt', text: body, images: promptImages(body) });
-  }
-  let r: ExecResult | undefined;
-  try {
-    if (prewarmable(h)) r = await execPrewarmed({ id: h.id, command: h.command, cwd, env }, args, h.timeoutMs, trace, debug);
-    r ??= await exec(h.command, args, { cwd, env, timeoutMs: h.timeoutMs });
-  } finally { release(); }
-  debug?.push({ title: `输出（exit ${r.code}）`, text: [pretty(r.out.trim()), r.err && `stderr:\n${r.err}`].filter(Boolean).join('\n\n') || '(空)' });
-  const parsed = parseCliResult(r.out);
-  if (r.code !== 0 || parsed.error) {
-    if (session) harnessSessions.delete(key);
-    throw new Error(`harness exit ${r.code}: ${short(parsed.error || r.err || r.out, 400)}`);
-  }
-  if (session) session.started = true;
-  return parsed.text;
+  // A generic ACP agent has no system prompt / model flags: the system prompt opens the first message instead.
+  const args = codebuddy
+    ? ['--append-system-prompt', system, ...(h.model ? ['--model', h.model] : []), ...(dirs.length ? ['--add-dir', ...dirs] : []), ...h.args]
+    : [...h.args];
+  // Built-in / custom tools of the agent (what the CLI does not have itself) go through the local proxy MCP server;
+  // CodeBuddy has AskUserQuestion natively (answered over ACP), other agents get ours.
+  const tools = h.toolProxy && !task ? await resolveTools(cfg, agent, { harness: true }) : [];
+  if (input.ask && !codebuddy && !task) tools.push(askTool());
+  const spec: AcpSpec = { harness: h, cwd, env, args, codebuddy, ask: !!input.ask && !task, mcpServers: h.passMcpServers && !task ? acpMcpServers(cfg, agent) : [], tools };
+  const body = raw ?? transcript(input, agent, limit);
+  const intro = codebuddy ? body : `${system}\n\n---\n\n${body}`;
+  const followUp = task ? null
+    : `${timeNote()}\n新消息：\n${input.incoming.map((m) => `${speaker(m, input.chat, input.isGroup)}: ${lineText(m, agent)}`).join('\n')}\n\n请直接输出回复正文；不需要回复则只输出 [SKIP]。`;
+  const q = (a: string) => (/^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`);
+  const cmd = [h.command, ...(codebuddy ? ['--acp'] : []), ...args];
+  trace.push(`$ ${prewarmable(h) ? '(预热) ' : ''}${cmd.map((a) => (a.length > 60 ? `'${a.slice(0, 57)}…'` : a)).join(' ')}`);
+  input.debug?.push({ title: '命令', text: `cd ${q(cwd)}\n${cmd.map(q).join(' ')}` });
+  const text = await acpPool.run(task ? null : `${h.id}:${input.chat}`, spec, {
+    intro, followUp, trace, debug: input.debug,
+    ctx: ctx ?? { chat: input.chat, isGroup: input.isGroup, history: input.history, skipped: null },
+    ask: codebuddy && input.ask && ctx?.ask ? ctx.ask : undefined,
+  });
+  input.debug?.push({ title: '输出', text: text || '(空)', images: promptImages(text) });
+  return text;
 }
 
 export async function runAgent(cfg: AppConfig, agentId: string, input: AgentInput): Promise<AgentOutput> {
@@ -577,7 +531,7 @@ export async function runAgent(cfg: AppConfig, agentId: string, input: AgentInpu
   if (!agent) throw new Error(`未找到 agent「${agentId}」`);
   const trace: string[] = [];
   const system = systemPrompt(cfg, agent, input);
-  const ctx: ToolCtx = { chat: input.chat, isGroup: input.isGroup, history: input.allHistory ?? input.history, skipped: null };
+  const ctx: ToolCtx = { chat: input.chat, isGroup: input.isGroup, history: input.allHistory ?? input.history, skipped: null, ask: askFn(cfg, input) };
   const limit = cfg.general.historyLimit;
   input.debug?.push({ title: '系统提示词', text: system || '(空)' });
 
@@ -591,6 +545,7 @@ export async function runAgent(cfg: AppConfig, agentId: string, input: AgentInpu
   if (!p) throw new Error(`未找到模型服务「${agent.provider}」`);
   if (!agent.model) throw new Error(`agent「${agent.id}」未设置 model`);
   const resolved = await resolveTools(cfg, agent);
+  if (input.ask) resolved.push(askTool());
   const tools = agent.maxToolRounds > 0 ? resolved : [];
   if (tools.length) trace.push(`tools: ${tools.map((t) => t.name).join(', ')}`);
   const run = (a: AgentConfig) => {
@@ -641,7 +596,7 @@ export async function completeText(cfg: AppConfig, agentId: string, system: stri
 
 /**
  * A one-off agent task with the memory / skill file tools (the dream): a model agent gets the scoped Read / Write / Edit /
- * Glob / Grep, a harness uses its native ones. Returns the agent's final text.
+ * Glob / Grep / Bash, a harness uses its native ones. Returns the agent's final text.
  */
 export async function runTask(cfg: AppConfig, agentId: string, system: string, user: string, maxRounds = 12): Promise<string> {
   const base = cfg.agents.find((a) => a.id === agentId);

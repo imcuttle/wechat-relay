@@ -1,24 +1,22 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { closeSync, openSync, readFileSync, rmSync } from 'node:fs';
 import { connect } from 'node:net';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { logger } from '../util';
 
 /**
- * Standby `codebuddy --prewarm` processes. A prewarmed process has finished its cold start (bundle, auth, product
+ * Standby `codebuddy --acp --prewarm` processes. A prewarmed process has finished its cold start (bundle, auth, product
  * config, MCP discovery) and waits on a local socket; `activate` binds the working directory + arguments and the
- * run starts at once (~5 s cold start → a few ms). A prewarmed process serves exactly one run, so a replacement is
- * started right after each take.
+ * process starts speaking ACP on its stdio at once (~5 s cold start → a few ms). A prewarmed process serves exactly
+ * one ACP client, so a replacement is started right after each take.
  */
 
 const log = logger.scope('预热');
 const TTL_MS = 20 * 60_000; // recycled so a standby never drifts far from the user's CodeBuddy settings / login
 const READY_TIMEOUT_MS = 60_000;
 
-/** Mode flags given at prewarm start (headless JSON output), so the standby initialises in that mode; not repeated at activation. */
-export const PREWARM_ARGS = ['-p', '--output-format', 'json'];
+/** Mode flag given at prewarm start, so the standby initialises in ACP mode; not repeated at activation. */
+export const PREWARM_ARGS = ['--acp'];
 
 export interface PrewarmSpec {
   /** harness id */
@@ -28,14 +26,11 @@ export interface PrewarmSpec {
   env: NodeJS.ProcessEnv;
 }
 
-export interface ExecResult { code: number | null; out: string; err: string }
-
 interface Standby {
   key: string;
   name: string;
   spec: PrewarmSpec;
   child: ChildProcess;
-  file: string;
   born: number;
   exited: boolean;
   err: string;
@@ -91,20 +86,17 @@ class Prewarm {
 
   private start(spec: PrewarmSpec): void {
     const name = `wr-${process.pid}-${randomUUID().slice(0, 8)}`;
-    const file = join(tmpdir(), `wechat-relay-prewarm-${randomUUID()}.out`);
-    const fd = openSync(file, 'w');
     let child: ChildProcess;
     try {
-      child = spawn(spec.command, [...PREWARM_ARGS, '--prewarm', '--prewarm-id', name], { cwd: spec.cwd, env: spec.env, stdio: ['pipe', fd, 'pipe'] });
+      child = spawn(spec.command, [...PREWARM_ARGS, '--prewarm', '--prewarm-id', name], { cwd: spec.cwd, env: spec.env, stdio: ['pipe', 'pipe', 'pipe'] });
     } catch (e) {
-      rmSync(file, { force: true });
       log.warn(`启动预热进程失败（${spec.id}）：${e instanceof Error ? e.message : e}`);
       return;
-    } finally { closeSync(fd); }
+    }
 
     const born = Date.now();
     const s: Standby = {
-      key: specKey(spec), name, spec, child, file, born, exited: false, err: '',
+      key: specKey(spec), name, spec, child, born, exited: false, err: '',
       ready: Promise.resolve(false),
       timer: setTimeout(() => {
         if (this.pool.get(spec.id) !== s) return;
@@ -121,7 +113,6 @@ class Prewarm {
       if (this.pool.get(spec.id) === s) {
         this.pool.delete(spec.id);
         clearTimeout(s.timer);
-        rmSync(file, { force: true });
         log.warn(`预热进程已退出（${spec.id}，${signal ?? `exit ${code}`}）${s.err.trim() ? `：${s.err.trim().slice(-200)}` : ''}`);
       }
     });
@@ -145,7 +136,6 @@ class Prewarm {
     if (this.pool.get(s.spec.id) === s) this.pool.delete(s.spec.id);
     clearTimeout(s.timer);
     if (!s.exited) s.child.kill('SIGTERM');
-    rmSync(s.file, { force: true });
     log.info(`丢弃预热进程（${s.spec.id}）：${why}`);
   }
 
@@ -160,7 +150,6 @@ class Prewarm {
     const ok = !s.exited && await s.ready;
     if (!ok || s.exited) {
       if (!s.exited) s.child.kill('SIGTERM');
-      rmSync(s.file, { force: true });
       this.start(spec);
       return { standby: null, info: `未命中：预热进程不可用${s.err.trim() ? `（${s.err.trim().slice(-120)}）` : ''}` };
     }
@@ -169,30 +158,19 @@ class Prewarm {
     return { standby: s, info: `命中：待命 ${Math.round((t0 - s.born) / 1000)}s${waited > 50 ? `，又等了 ${waited}ms 就绪` : ''}` };
   }
 
-  /** Activates a taken standby with the real cwd + arguments and waits for the run to finish. null: activation failed (fall back to a cold start). */
-  async run(s: Standby, cwd: string, args: string[], timeoutMs: number): Promise<{ result: ExecResult; activateMs: number } | { result: null; error: string }> {
-    const t0 = Date.now();
-    const cleanup = () => rmSync(s.file, { force: true });
+  /**
+   * Activates a taken standby with the real cwd + arguments; from then on the process speaks ACP on its stdio.
+   * Returns the process, or the error (the caller falls back to a cold start).
+   */
+  async activate(s: Standby, cwd: string, args: string[]): Promise<{ child: ChildProcess; err: () => string } | { child: null; error: string }> {
     try {
       const r = await ipc(s.name, { cmd: 'activate', cwd, args }, 10_000);
       if (!r?.ok) throw new Error(String(r?.error ?? '激活被拒绝'));
     } catch (e) {
       if (!s.exited) s.child.kill('SIGTERM');
-      cleanup();
-      return { result: null, error: e instanceof Error ? e.message : String(e) };
+      return { child: null, error: e instanceof Error ? e.message : String(e) };
     }
-    const activateMs = Date.now() - t0;
-    const code = await new Promise<number | null>((resolve) => {
-      const timer = setTimeout(() => s.child.kill('SIGTERM'), timeoutMs);
-      const done = (c: number | null) => { clearTimeout(timer); resolve(c); };
-      if (s.exited) return done(s.child.exitCode);
-      s.child.once('close', (c) => done(c));
-      s.child.stdin!.end('');
-    });
-    let out = '';
-    try { out = readFileSync(s.file, 'utf8'); } catch { /* nothing written */ }
-    cleanup();
-    return { result: { code, out, err: s.err }, activateMs };
+    return { child: s.child, err: () => s.err };
   }
 
   dispose(): void {

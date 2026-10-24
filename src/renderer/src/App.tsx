@@ -2,6 +2,7 @@ import { Activity as KeepAlive, useState, type ReactElement } from 'react';
 import { App as AntApp, Badge, Button, Layout, Menu, Segmented, Space, Switch, Tag, Tooltip, Typography } from 'antd';
 import { Activity, Bot, Brain, Code, Cpu, FileText, Sparkles, Inbox, ListFilter, MessagesSquare, Play, ScrollText, Square, Wrench } from 'lucide-react';
 import ErrorBoundary from './components/ErrorBoundary';
+import { PageVisit } from './pageVisit';
 import { RelayProvider, errMsg, useRelay } from './relay';
 import Dashboard from './pages/Dashboard';
 import Chats from './pages/Chats';
@@ -27,7 +28,14 @@ function Shell() {
 
   // Keep-alive: a page is mounted on first visit; hidden pages use display:none (React Activity) so nothing of them is painted.
   const [visited, setVisited] = useState<string[]>(['dashboard']);
-  const open = (key: string) => { setPage(key); setVisited((v) => (v.includes(key) ? v : [...v, key])); };
+  /** Times each page was shown (see PageVisit). */
+  const [visits, setVisits] = useState<Record<string, number>>({});
+  const open = (key: string) => {
+    if (key === page) return;
+    setPage(key);
+    setVisited((v) => (v.includes(key) ? v : [...v, key]));
+    setVisits((n) => ({ ...n, [key]: (n[key] ?? 0) + 1 }));
+  };
 
   const pages: Record<string, ReactElement> = {
     dashboard: <Dashboard />, chats: <Chats />, drafts: <Drafts />, rules: <Rules />, agents: <Agents />,
@@ -88,6 +96,16 @@ function Shell() {
                     onChange={(v) => void saveConfig((c) => { c.general.mode = v as 'auto' | 'review'; })}
                   />
                 </Tooltip>
+                <Tooltip title="允许智能体用 AskUserQuestion 弹出全局窗口问你（事实不清楚时）。可在「会话记录」里为单个会话单独开关，优先级高于此处">
+                  <Space size={6}>
+                    <Typography.Text>询问我</Typography.Text>
+                    <Switch
+                      size="small"
+                      checked={config.general.askUser}
+                      onChange={(v) => void saveConfig((c) => { c.general.askUser = v; })}
+                    />
+                  </Space>
+                </Tooltip>
                 <Space size={6}>
                   <Typography.Text>自动操作</Typography.Text>
                   <Switch
@@ -105,7 +123,9 @@ function Shell() {
         <Content style={{ overflow: 'hidden', position: 'relative' }}>
           {visited.map((key) => (
             <KeepAlive key={key} mode={key === page ? 'visible' : 'hidden'}>
-              <div style={{ position: 'absolute', inset: 0 }}><ErrorBoundary resetKey={key === page}>{pages[key]}</ErrorBoundary></div>
+              <div style={{ position: 'absolute', inset: 0 }}>
+                <PageVisit.Provider value={visits[key] ?? 0}><ErrorBoundary resetKey={key === page}>{pages[key]}</ErrorBoundary></PageVisit.Provider>
+              </div>
             </KeepAlive>
           ))}
         </Content>

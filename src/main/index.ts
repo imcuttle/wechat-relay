@@ -4,9 +4,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { app, BrowserWindow, dialog, ipcMain, nativeImage, net, Notification, protocol, shell } from 'electron';
-import type { AppConfig, ChatMessage, DebugSection, Persona, PromptCase, PersonaOptions, RelayEvent, ReplyMode, TestAgentRequest, TestAgentResult, ToolConfig } from '@shared/types';
+import type { AppConfig, ChatMessage, DebugSection, Draft, Persona, PromptCase, PersonaOptions, RelayEvent, ReplyMode, TestAgentRequest, TestAgentResult, ToolConfig } from '@shared/types';
 import { dream } from './agent/dream';
-import { runAgent, syncPrewarm } from './agent/engine';
+import { runAgent, syncHarnesses } from './agent/engine';
+import { acpPool } from './agent/acp';
 import { prewarm } from './agent/prewarm';
 import { memorySummaries, readMemory, writeMemory } from './agent/memory';
 import { proxy } from './agent/proxy';
@@ -15,6 +16,7 @@ import { prepareScriptTool } from './agent/scriptTools';
 import { mcpPool } from './agent/tools';
 import { CONFIG_PATH, configStore, MEDIA_DIR } from './config';
 import { Monitor } from './monitor';
+import { popup } from './popup';
 import { store } from './store';
 import { errText, logger } from './util';
 import { personaPromptId } from '@shared/prompt';
@@ -168,6 +170,7 @@ function registerIpc(): void {
   handle('addChat', (chat: string) => monitor.addChat(chat));
   handle('generateReply', (chat: string, agent?: string) => monitor.generateReply(chat, agent));
   handle('setChatMode', (chat: string, mode: ReplyMode | 'inherit') => store.setMode(chat, mode));
+  handle('setChatAsk', (chat: string, ask: 'inherit' | 'on' | 'off') => store.setAsk(chat, ask));
   handle('getPersona', (chat: string) => getPersona(chat));
   handle('setPersona', (chat: string, p: { text: string; enabled: boolean }) => setPersona(chat, p));
   handle('selectPersona', (chat: string, prompt: string | null) => selectPersona(chat, prompt));
@@ -228,12 +231,36 @@ function registerIpc(): void {
     const incoming: ChatMessage[] = [];
     for (let i = history.length - 1; i >= 0 && history[i].side === 'other'; i--) incoming.unshift(history[i]);
     try {
-      const out = await runAgent(configStore.config, req.agent, { chat: req.chat, isGroup: req.isGroup, history, incoming, debug: detail });
+      const out = await runAgent(configStore.config, req.agent, { chat: req.chat, isGroup: req.isGroup, history, incoming, debug: detail, ask: req.ask });
       return { ok: true, reply: out.reply, skipped: out.skipped, trace: [...out.trace, ...(out.reason ? [`skip: ${out.reason}`] : [])], detail, ms: Date.now() - t0 };
     } catch (e) {
       return { ok: false, error: errText(e), trace: [], detail, ms: Date.now() - t0 };
     }
   });
+}
+
+/** Approval of a new draft in the global popup; closed / timed out = it stays in 待审核. */
+const reviewing = new Set<string>();
+async function reviewInPopup(draft: Draft): Promise<void> {
+  if (reviewing.has(draft.id)) return;
+  reviewing.add(draft.id);
+  const isGroup = store.chat(draft.chat)?.isGroup ?? false;
+  const trigger = new Set(draft.trigger.split('\n'));
+  const lines = store.history(draft.chat).slice(-8).map((m) => {
+    const who = m.side === 'self' ? '我' : isGroup ? m.sender || '群成员' : draft.chat;
+    return { who, text: m.text, self: m.side === 'self', isNew: m.side === 'other' && trigger.has(m.sender ? `${m.sender}: ${m.text}` : m.text) };
+  });
+  const r = await popup().review({ id: draft.id, chat: draft.chat, isGroup, lines, text: draft.text, timeoutSec: configStore.config.general.askTimeoutSec });
+  // Handled in the main window meanwhile.
+  if (store.drafts().find((d) => d.id === draft.id)?.status !== 'pending') return;
+  try {
+    if (r.action === 'send') await monitor.approve(draft.id, r.text);
+    else if (r.action === 'reject') await monitor.reject(draft.id);
+  } catch (e) {
+    log.error(`审批草稿失败：${errText(e)}`);
+  } finally {
+    reviewing.delete(draft.id);
+  }
 }
 
 // Last-resort guard: log instead of showing Electron's modal "JavaScript error in the main process" dialog.
@@ -273,19 +300,21 @@ app.whenReady().then(() => {
     syncSkills(c);
     monitor.setConfig(c);
     void mcpPool.closeAll();
-    syncPrewarm(c);
+    syncHarnesses(c);
     send({ type: 'config', config: c });
     log.info('配置已更新');
   });
 
-  syncPrewarm(configStore.config);
+  syncHarnesses(configStore.config);
   monitor = new Monitor(configStore.config, visionBinary(app.getAppPath(), app.isPackaged ? process.resourcesPath : undefined));
   monitor.on('status', (status) => send({ type: 'status', status }));
   monitor.on('frame', sendFrame);
   monitor.on('chat', (chat, message) => send({ type: 'chat', chat, message }));
-  monitor.on('draft', (draft) => {
+  monitor.on('draft', (draft: Draft) => {
     send({ type: 'draft', draft });
-    if (draft.status === 'pending' && Notification.isSupported()) new Notification({ title: `待审核回复 · ${draft.chat}`, body: draft.text }).show();
+    if (draft.status !== 'pending') return;
+    if (configStore.config.general.reviewPopup) void reviewInPopup(draft);
+    else if (Notification.isSupported()) new Notification({ title: `待审核回复 · ${draft.chat}`, body: draft.text }).show();
   });
   monitor.on('safety', (msg: string) => {
     configStore.save({ ...configStore.config, general: { ...configStore.config.general, autoReply: false } });
@@ -294,6 +323,7 @@ app.whenReady().then(() => {
   logger.on('entry', (entry) => send({ type: 'log', entry }));
 
   registerIpc();
+  popup();
   createWindow();
   void monitor.repairImages().catch((e) => log.warn(`修复图片消息失败：${errText(e)}`)).finally(() => void monitor.start());
 
@@ -301,4 +331,4 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => { /* keep monitoring in the background on macOS */ if (process.platform !== 'darwin') app.quit(); });
-app.on('before-quit', () => { store.flush(); void monitor?.dispose(); void mcpPool.closeAll(); proxy.close(); prewarm.dispose(); });
+app.on('before-quit', () => { store.flush(); void monitor?.dispose(); void mcpPool.closeAll(); proxy.close(); prewarm.dispose(); acpPool.dispose(); popup().dispose(); });

@@ -2,9 +2,15 @@ import { createRoot } from 'react-dom/client';
 import { App as AntApp, ConfigProvider, theme } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import App from './App';
+import Popup from './Popup';
 import './styles.css';
 
-createRoot(document.getElementById('root')!).render(
+const root = createRoot(document.getElementById('root')!);
+if (location.hash === '#popup') {
+  // Frameless transparent window: only the card is painted.
+  document.documentElement.classList.add('popup');
+  root.render(<Popup />);
+} else root.render(
   <ConfigProvider
     locale={zhCN}
     theme={{

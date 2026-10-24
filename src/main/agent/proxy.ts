@@ -73,12 +73,19 @@ class Proxy {
     }
   }
 
-  /** Registers a run; `release` must be called when the harness process ended. */
-  async register(run: ProxyRun): Promise<{ url: string; token: string; release: () => void }> {
+  /**
+   * Registers a run; `release` must be called when the harness process ended. A long-lived ACP process keeps its
+   * registration (the URL is fixed in its MCP config) and `update`s the context before every reply.
+   */
+  async register(run: ProxyRun): Promise<{ url: string; token: string; release: () => void; update: (ctx: ToolCtx, trace: string[]) => void }> {
     const port = await this.start();
     const token = randomUUID();
     this.runs.set(token, { ...run, calls: 0 });
-    return { url: `http://127.0.0.1:${port}/mcp`, token, release: () => { this.runs.delete(token); } };
+    return {
+      url: `http://127.0.0.1:${port}/mcp`, token,
+      release: () => { this.runs.delete(token); },
+      update: (ctx, trace) => { const r = this.runs.get(token); if (r) Object.assign(r, { ctx, trace, calls: 0 }); },
+    };
   }
 
   close(): void {

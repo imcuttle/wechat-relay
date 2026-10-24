@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { RelayApi, RelayEvent } from '@shared/types';
+import type { PopupRequest, RelayApi, RelayEvent } from '@shared/types';
 
 const call = (channel: string) => (...args: unknown[]) => ipcRenderer.invoke(channel, ...args);
 
@@ -27,6 +27,7 @@ const api: RelayApi = {
   addChat: call('addChat') as RelayApi['addChat'],
   generateReply: call('generateReply') as RelayApi['generateReply'],
   setChatMode: call('setChatMode') as RelayApi['setChatMode'],
+  setChatAsk: call('setChatAsk') as RelayApi['setChatAsk'],
   getPersona: call('getPersona') as RelayApi['getPersona'],
   setPersona: call('setPersona') as RelayApi['setPersona'],
   setPersonaCases: call('setPersonaCases') as RelayApi['setPersonaCases'],
@@ -49,6 +50,15 @@ const api: RelayApi = {
     ipcRenderer.on('relay:event', listener);
     return () => ipcRenderer.removeListener('relay:event', listener);
   },
+  onPopup: (cb) => {
+    const listener = (_: unknown, r: PopupRequest | null) => cb(r);
+    ipcRenderer.on('popup:request', listener);
+    void ipcRenderer.invoke('popup:current').then(cb);
+    return () => ipcRenderer.removeListener('popup:request', listener);
+  },
+  answerPopup: call('popup:answer') as RelayApi['answerPopup'],
+  holdPopup: (id) => ipcRenderer.send('popup:hold', id),
+  resizePopup: (h) => ipcRenderer.send('popup:resize', h),
 };
 
 contextBridge.exposeInMainWorld('relay', api);

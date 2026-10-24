@@ -28,7 +28,49 @@ export interface GeneralConfig {
   historyMinutes: number;
   /** Image messages are cropped from the screenshot and saved as JPEG with this longest side (px). */
   imageMaxSize: number;
+  /**
+   * The agent gets the AskUserQuestion tool and may ask you (a popup in front of everything) before replying.
+   * Per-chat override in 会话记录.
+   */
+  askUser: boolean;
+  /** Seconds the popup waits before it gives up (stops counting once you interact): questions are skipped, drafts stay in 待审核. */
+  askTimeoutSec: number;
+  /**
+   * System prompt section added when asking is on (empty = DEFAULT_ASK_PROMPT): when the agent should ask.
+   * Variables {{myNickname}} {{chat}} {{askTimeoutSec}}, {{#memory}}…{{/memory}}.
+   */
+  askPrompt?: string;
+  /** Drafts waiting for approval also pop up in the global window (send / edit / reject without opening the app). */
+  reviewPopup: boolean;
 }
+
+/** AskUserQuestion input, same shape as CodeBuddy / Claude Code's tool. */
+export interface AskQuestion {
+  question: string;
+  /** Short chip label (max 12 chars). */
+  header: string;
+  options: Array<{ label: string; description: string }>;
+  multiSelect: boolean;
+}
+
+/** A message of the conversation shown above the question / draft. */
+export interface PopupLine { who: string; text: string; self: boolean; /** One of the messages being replied to. */ isNew?: boolean }
+
+/** Where a popup comes from: the chat and its recent messages. */
+export interface PopupContext { chat?: string; isGroup?: boolean; lines?: PopupLine[] }
+
+/** One popup of the global window: questions of an agent, or a draft to approve. */
+export type PopupRequest =
+  | ({ kind: 'ask'; id: string; questions: AskQuestion[]; timeoutSec: number } & PopupContext)
+  | ({ kind: 'review'; id: string; text: string; timeoutSec: number } & PopupContext);
+
+/** question text → answer (labels joined by ", " for multiSelect); null = declined / timed out. */
+export type AskAnswers = Record<string, string> | null;
+
+/** later = closed / timed out: the draft stays in 待审核. */
+export type ReviewResult = { action: 'send'; text: string } | { action: 'reject' } | { action: 'later' };
+
+export type PopupResult = AskAnswers | ReviewResult;
 
 export interface DriverConfig {
   /** Path to cua-driver-mcp (or `cua-driver`), "auto" to detect the one bundled with CodeBuddy. */
@@ -50,23 +92,30 @@ export interface ProviderConfig {
 export interface HarnessConfig {
   id: string;
   name?: string;
-  /** codebuddy / claude-code: headless `-p` mode; command: any CLI that reads the prompt on stdin and prints the reply. */
-  type: 'codebuddy' | 'claude-code' | 'command';
+  /**
+   * codebuddy: `codebuddy --acp` (Agent Client Protocol over stdio); acp: any command that speaks ACP over stdio
+   * (e.g. `npx -y @agentclientprotocol/claude-agent-acp`); command: any CLI that reads the prompt on stdin and prints the reply.
+   */
+  type: 'codebuddy' | 'acp' | 'command';
   command: string;
   args: string[];
+  /** codebuddy: --model; acp: not passed (configure it in args / env of the ACP command). */
   model?: string;
   cwd?: string;
   env?: Record<string, string>;
+  /** Per reply. */
   timeoutMs: number;
-  /** Keep one harness session per chat (codebuddy / claude-code). */
+  /** Keep one ACP session per chat (otherwise every reply starts a new session). */
   sessionPerChat: boolean;
-  /** Pass the configured MCP servers of the agent to the harness via --mcp-config. */
+  /** An ACP process serves one chat; it exits after this many minutes without a new message (0 = right after each reply). */
+  idleMinutes: number;
+  /** Pass the configured MCP servers of the agent to the harness (ACP session/new mcpServers). */
   passMcpServers: boolean;
   /** Give the harness the agent's built-in / custom tools (and memory / skill tools) through a local proxy MCP server. */
   toolProxy: boolean;
   /** Turn off the CLI's own auto-memory (CODEBUDDY_DISABLE_AUTO_MEMORY / CLAUDE_CODE_DISABLE_AUTO_MEMORY): ours replaces it. */
   disableNativeMemory: boolean;
-  /** codebuddy only: keep a prewarmed `codebuddy --prewarm` process on standby; cwd and arguments are bound at activation. */
+  /** codebuddy only: keep a prewarmed `codebuddy --acp --prewarm` process on standby; cwd and arguments are bound at activation. */
   prewarm: boolean;
 }
 
@@ -343,6 +392,8 @@ export interface ChatSummary {
   paused: boolean;
   /** Per-chat send mode; 'inherit' = rule / global setting. */
   mode: ReplyMode | 'inherit';
+  /** Per-chat AskUserQuestion switch; 'inherit' = general.askUser. */
+  ask: 'inherit' | 'on' | 'off';
   /** prompt: id of the prompt in use. */
   persona?: { enabled: boolean; prompt: string };
 }
@@ -395,6 +446,8 @@ export interface TestAgentRequest {
   isGroup: boolean;
   /** image: data URL of a picture message; text is then the text inside it (empty = OCR it). */
   messages: Array<{ side: 'self' | 'other'; sender?: string; text: string; image?: string }>;
+  /** Give the agent AskUserQuestion (the popup shows up for real). */
+  ask?: boolean;
 }
 
 /** One block of the full request / response log of an agent run (debug panel). images: local file paths. */
@@ -446,6 +499,7 @@ export interface RelayApi {
   generateReply(chat: string, agent?: string): Promise<{ text: string | null; agent: string; reason?: string; ms: number }>;
   /** Per-chat send mode; overrides the rule and global mode. */
   setChatMode(chat: string, mode: ReplyMode | 'inherit'): Promise<void>;
+  setChatAsk(chat: string, ask: 'inherit' | 'on' | 'off'): Promise<void>;
   getPersona(chat: string): Promise<Persona | null>;
   /** text empty = remove the persona. */
   setPersona(chat: string, persona: { text: string; enabled: boolean }): Promise<void>;
@@ -472,4 +526,12 @@ export interface RelayApi {
   /** Consolidates the memory of `chat` (and the global one) with the dream agent; chat omitted = global memory only. */
   dreamMemory(chat?: string): Promise<{ message: string }>;
   onEvent(cb: (e: RelayEvent) => void): () => void;
+  // ---- Global popup window (AskUserQuestion / draft approval) ----
+  /** The popup's current request (null when none), and its updates. */
+  onPopup(cb: (req: PopupRequest | null) => void): () => void;
+  answerPopup(id: string, result: PopupResult): Promise<void>;
+  /** The user started interacting: stop the timeout. */
+  holdPopup(id: string): void;
+  /** Content height of the popup, so the window fits it. */
+  resizePopup(height: number): void;
 }

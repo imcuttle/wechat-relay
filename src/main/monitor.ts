@@ -447,6 +447,9 @@ export class Monitor extends EventEmitter {
     });
   }
 
+  /** AskUserQuestion switch of a chat: its own setting, else the global one. */
+  private askFor(chat: string): boolean { return store.chat(chat)?.ask ?? this.cfg.general.askUser; }
+
   private async reply(p: Pending, canAct: boolean): Promise<void> {
     const agentId = p.rule.agent ?? this.cfg.agents[0]?.id;
     if (!agentId) { log.warn('没有可用的 agent'); return; }
@@ -466,7 +469,7 @@ export class Monitor extends EventEmitter {
     const t0 = Date.now();
     let out;
     try {
-      out = await runAgent(this.cfg, agentId, { chat: p.chat, isGroup: p.isGroup, history, allHistory: all, incoming: p.incoming, persona: this.personaText(p.chat) });
+      out = await runAgent(this.cfg, agentId, { chat: p.chat, isGroup: p.isGroup, history, allHistory: all, incoming: p.incoming, persona: this.personaText(p.chat), ask: this.askFor(p.chat) });
     } catch (e) {
       log.error(`agent ${agentId} 失败：${errText(e)}`);
       return;
@@ -850,7 +853,7 @@ export class Monitor extends EventEmitter {
     if (recent.length >= Math.min(5, history.length)) history = recent;
     const t0 = Date.now();
     log.info(`「${chat}」手动生成回复 → agent ${agent}（上下文 ${history.length} 条）`);
-    const out = await runAgent(this.cfg, agent, { chat, isGroup: state.isGroup, history, allHistory: all, incoming, persona: this.personaText(chat) });
+    const out = await runAgent(this.cfg, agent, { chat, isGroup: state.isGroup, history, allHistory: all, incoming, persona: this.personaText(chat), ask: this.askFor(chat) });
     for (const t of out.trace) log.debug(t);
     const ms = Date.now() - t0;
     if (out.skipped || !out.reply) return { text: null, agent, reason: out.reason ?? '智能体决定不回复', ms };
