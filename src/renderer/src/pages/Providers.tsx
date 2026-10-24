@@ -96,15 +96,15 @@ export default function Providers() {
               );
               return (
                 <>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1.6fr 1fr', gap: '0 12px' }}>
-                    {type !== 'acp' ? <Form.Item name="model" label={cli ? '模型（--model）' : '模型（参数中的 {{model}}）'}><Input placeholder="默认" /></Form.Item> : <div />}
+                  <div style={{ display: 'grid', gridTemplateColumns: type === 'acp' ? '1fr 1fr' : cli ? '1.6fr 1fr 1fr' : '1.6fr 1fr', gap: '0 12px' }}>
+                    {type !== 'acp' && <Form.Item name="model" label={cli ? '模型（--model）' : '模型（参数中的 {{model}}）'}><Input placeholder="默认" /></Form.Item>}
                     <Form.Item name="timeoutMs" label="单次回复超时(ms)"><InputNumber min={5000} step={5000} style={{ width: '100%' }} /></Form.Item>
+                    {cli && (
+                      <Form.Item name="idleMinutes" label="空闲退出(分钟)" tooltip="每个微信会话一个常驻 ACP 进程，这么久没有新消息就结束进程（下次自动恢复会话）。0 = 每次回复后就结束">
+                        <InputNumber min={0} max={1440} style={{ width: '100%' }} />
+                      </Form.Item>
+                    )}
                   </div>
-                  {cli && (
-                    <Form.Item name="idleMinutes" label="空闲退出(分钟)" tooltip="每个微信会话一个常驻 ACP 进程，这么久没有新消息就结束进程（下次自动恢复会话）。0 = 每次回复后就结束">
-                      <InputNumber min={0} max={1440} />
-                    </Form.Item>
-                  )}
                   {cli && (
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 16 }}>
                       {opt('sessionPerChat', '每个会话保持上下文', '开启后每个微信会话在 harness 中保持一个 ACP 会话，之后只发新消息；进程空闲退出后用 session/load 恢复')}
