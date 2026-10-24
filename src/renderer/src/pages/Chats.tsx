@@ -283,6 +283,11 @@ export default function Chats() {
                 <div key={m.id} onClick={selecting ? () => toggle(m.id) : undefined}
                   style={{ display: 'flex', gap: 8, alignItems: 'flex-start', cursor: selecting ? 'pointer' : undefined, borderRadius: 6, background: selected.has(m.id) ? 'rgba(22,119,255,.08)' : undefined }}>
                 {selecting && <Checkbox checked={selected.has(m.id)} style={{ marginTop: 18 }} />}
+                {m.kind === 'notice' ? (
+                  <Tooltip title={new Date(m.at).toLocaleString()}>
+                    <Typography.Text type="secondary" style={{ margin: '0 auto', fontSize: 12, padding: '2px 8px', background: 'rgba(0,0,0,.04)', borderRadius: 4 }}>{m.text}</Typography.Text>
+                  </Tooltip>
+                ) : (
                 <div style={{ marginLeft: m.side === 'self' ? 'auto' : undefined, maxWidth: '70%', display: 'flex', flexDirection: 'column', alignItems: m.side === 'self' ? 'flex-end' : 'flex-start' }}>
                   <Typography.Text type="secondary" style={{ fontSize: 11 }}>
                     {m.side === 'self' ? (m.source === 'bot' ? '机器人' : '我') : m.sender || current.name} · {new Date(m.at).toLocaleString()}
@@ -298,6 +303,7 @@ export default function Chats() {
                     ) : m.text}
                   </div>
                 </div>
+                )}
                 </div>
               ))}
               <div ref={bottom} />

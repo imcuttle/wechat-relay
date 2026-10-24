@@ -1,4 +1,5 @@
 import type { AppConfig, ChatMessage, RuleConfig } from '@shared/types';
+import { isNotice, noticeActor, patsMe } from './notice';
 import { normText } from './wechat';
 
 /** exact (normalised), `*` wildcard, or /regex/flags */
@@ -42,10 +43,13 @@ export function matchRule(cfg: AppConfig, ctx: RuleContext, metadataOnly = false
     if (m.chatType === 'group' && !ctx.isGroup) continue;
     if (m.chatType === 'private' && ctx.isGroup) continue;
     if (!metadataOnly) {
+      const me = cfg.general.myNickname;
       const texts = ctx.messages.map((x) => x.text);
-      if (m.senders?.length && !ctx.messages.some((x) => x.sender && m.senders!.some((p) => matchPattern(p, x.sender!)))) continue;
+      const senderOf = (x: ChatMessage) => noticeActor(x, me) ?? (isNotice(x) ? undefined : x.sender);
+      if (m.senders?.length && !ctx.messages.some((x) => { const s = senderOf(x); return s && m.senders!.some((p) => matchPattern(p, s)); })) continue;
       if (m.keywords?.length && !texts.some((t) => m.keywords!.some((k) => (k.startsWith('/') ? matchPattern(k, t) : t.includes(k))))) continue;
-      if (m.mentionOnly && ctx.isGroup && !texts.some((t) => isMention(t, cfg.general.myNickname, m.includeAtAll ?? false))) continue;
+      // Being patted (拍一拍) addresses me just like an @.
+      if (m.mentionOnly && ctx.isGroup && !ctx.messages.some((x) => patsMe(x, me) || (!isNotice(x) && isMention(x.text, me, m.includeAtAll ?? false)))) continue;
     } else if (m.mentionOnly && ctx.isGroup && !ctx.mentionedHint) {
       continue;
     }

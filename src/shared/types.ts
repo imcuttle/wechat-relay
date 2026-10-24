@@ -346,7 +346,8 @@ export interface ChatMessage {
   at: number;
   /** ocr = seen on screen; bot = sent by this app */
   source: 'ocr' | 'bot';
-  kind?: 'text' | 'image';
+  /** notice = system line in the chat (拍一拍, 撤回, 入群 …), stored with sender「系统提示」. */
+  kind?: 'text' | 'image' | 'notice';
   /** Compressed JPEG crop of an image message. */
   image?: string;
   /** The crop was validated (not blank / not a mis-detected text bubble). */

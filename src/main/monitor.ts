@@ -9,6 +9,7 @@ import { noteMessages } from './agent/dream';
 import { ContextWindows } from './agent/window';
 import { CACHE_DIR, CONFIG_PATH, MEDIA_DIR } from './config';
 import { CuaDriver } from './driver';
+import { NOTICE_SENDER, isNotice, patsMe } from './notice';
 import { matchRule } from './rules';
 import { dropImages, store } from './store';
 import { parseWxTime, stamp } from './timeline';
@@ -59,14 +60,19 @@ function overlap(older: Seen[], newer: Seen[]): number {
 
 const signature = (xs: Seen[]) => xs.map((m) => `${m.side}:${normText(m.text)}`).join('|');
 
-/** Messages plus time separators on screen, top → bottom, with estimated send times. */
+/**
+ * Messages plus time separators on screen, top → bottom, with estimated send times. System notices (拍一拍, 撤回 …)
+ * become messages from「系统提示」on the other side so they reach the history and the model.
+ */
 function seen(frame: Frame): Seen[] {
   const items: Seen[] = frame.vision.messages
-    .filter((m) => !m.partial && (m.side !== 'system' || m.kind === 'time') && !isNoiseText(m.text))
-    .map((m) => ({
-      id: '', side: m.side, sender: m.sender ?? undefined, text: m.text, at: 0, source: 'ocr' as const,
-      vkind: m.kind, box: m.box, ...(m.kind === 'image' ? { kind: 'image' as const } : {}),
-    }));
+    .filter((m) => !m.partial && !isNoiseText(m.text) && (m.side !== 'system' || m.kind === 'time' || m.text.trim().length >= 2))
+    .map((m) => (m.side === 'system' && m.kind !== 'time'
+      ? { id: '', side: 'other' as const, sender: NOTICE_SENDER, text: m.text.replace(/\s+/g, ' ').trim(), at: 0, source: 'ocr' as const, vkind: m.kind, box: m.box, kind: 'notice' as const }
+      : {
+          id: '', side: m.side, sender: m.sender ?? undefined, text: m.text, at: 0, source: 'ocr' as const,
+          vkind: m.kind, box: m.box, ...(m.kind === 'image' ? { kind: 'image' as const } : {}),
+        }));
   stamp(items.map((m) => ({ side: m.side, kind: m.vkind, text: m.text }))).forEach((t, i) => { items[i].at = t; });
   return items;
 }
@@ -89,6 +95,26 @@ export function newStart(stored: ChatMessage[], visible: ChatMessage[]): number 
     if (m >= Math.min(b, 3) && m > 0) return b;
   }
   return -1;
+}
+
+const plain = <T extends { kind?: string }>(xs: T[]) => xs.filter((m) => !isNotice(m));
+
+/**
+ * newStart, tolerating notices that are on screen but not in the records (history stored before notices were kept, or
+ * a notice OCR'd differently): match on the real messages, then treat notices after the last known one as new unless
+ * they are already the stored tail.
+ */
+function startOf(stored: ChatMessage[], visible: ChatMessage[]): number {
+  const full = newStart(stored, visible);
+  if (full >= 0) return full;
+  const vis = plain(visible);
+  const p = newStart(plain(stored), vis);
+  if (p < 0) return -1;
+  let i = visible.indexOf(vis[p - 1]) + 1;
+  let j = stored.length;
+  while (j > 0 && isNotice(stored[j - 1])) j--;
+  for (; j < stored.length && i < visible.length && isNotice(visible[i]) && sameMsg(visible[i], stored[j]); j++) i++;
+  return i;
 }
 
 /**
@@ -136,7 +162,7 @@ ${style.trim()}
 function personaTranscript(chat: string, isGroup: boolean, msgs: ChatMessage[], myNickname: string, cases?: PromptConfig): string {
   const fmt = (t: number) => { const d = new Date(t); const p = (n: number) => String(n).padStart(2, '0'); return `${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`; };
   const lines = msgs.map((m) => {
-    const who = m.side === 'self' ? (m.source === 'bot' ? '我[代发]' : '我') : isGroup ? m.sender || '群成员' : chat;
+    const who = isNotice(m) ? NOTICE_SENDER : m.side === 'self' ? (m.source === 'bot' ? '我[代发]' : '我') : isGroup ? m.sender || '群成员' : chat;
     return `[${fmt(m.at)}] ${who}: ${m.text.replace(/\s+/g, ' ').slice(0, 300)}`;
   });
   // Keep the most recent part when the transcript is huge.
@@ -280,7 +306,7 @@ export class Monitor extends EventEmitter {
     // 2. Open one unread chat that a reply rule would handle.
     if (canAct && this.cfg.general.openUnreadChats && !this.pending.size) {
       const row = frame.vision.sessions.find((s) => s.unread && !s.selected && !store.chat(s.name)?.paused &&
-        matchRule(this.cfg, { chat: s.name, isGroup: store.chat(s.name)?.isGroup ?? /[：:]/.test(s.preview), messages: [], mentionedHint: s.mentioned }, true)?.action === 'reply');
+        matchRule(this.cfg, { chat: s.name, isGroup: store.chat(s.name)?.isGroup ?? /[：:]/.test(s.preview), messages: [], mentionedHint: s.mentioned || /拍了拍\s*我/.test(s.preview) }, true)?.action === 'reply');
       if (row) {
         const unread = Number(/\[(\d+)\s*条\]/.exec(row.preview.replace(/[［］]/g, (c) => (c === '［' ? '[' : ']')))?.[1] ?? 1);
         log.info(`打开未读会话「${row.name}」（${unread} 条）`);
@@ -313,7 +339,7 @@ export class Monitor extends EventEmitter {
    * mis-detected text bubble) is dropped and the message falls back to the crop's OCR text. Images without OCR text
    * get the text read from the crop, so text-only models (and the fallback) still see what it says.
    */
-  private async checkImage(m: { text: string; kind?: 'text' | 'image'; image?: string }, path: string, std?: number): Promise<void> {
+  private async checkImage(m: { text: string; kind?: ChatMessage['kind']; image?: string }, path: string, std?: number): Promise<void> {
     const o = await this.vision.ocr(path).catch(() => null);
     const s = std ?? o?.std ?? 0;
     const raw = o?.text.trim() ?? '';
@@ -382,15 +408,15 @@ export class Monitor extends EventEmitter {
     if (!visible.length) return;
 
     const state = store.ensure(name, isGroup);
-    let start = newStart(state.messages, visible);
-    if (start < 0 && state.messages.length && scrolledBack(state.messages, visible)) {
+    let start = startOf(state.messages, visible);
+    if (start < 0 && state.messages.length && (scrolledBack(state.messages, visible) || scrolledBack(plain(state.messages), plain(visible)))) {
       log.debug(`「${name}」屏幕显示的是已记录的较早内容（可能在向上翻看历史），跳过`);
       return;
     }
     const resync = start < 0;
     if (resync) {
       // First sight (or resync): everything on screen is old unless the chat had an unread badge.
-      const others = visible.map((m, i) => ({ m, i })).filter((x) => x.m.side === 'other');
+      const others = visible.map((m, i) => ({ m, i })).filter((x) => x.m.side === 'other' && !isNotice(x.m));
       start = unreadHint > 0 && others.length ? others[Math.max(0, others.length - unreadHint)].i : visible.length;
     }
 
@@ -433,6 +459,10 @@ export class Monitor extends EventEmitter {
     if (msgs.some((m) => m.side === 'self' && m.source !== 'bot')) { this.pending.delete(name); return; }
     const incoming = msgs.filter((m) => m.side === 'other');
     if (!incoming.length || state.paused) return;
+    // Notices alone (撤回, 入群, others patting each other …) are context only; a pat on me counts like a message to me.
+    const me = this.cfg.general.myNickname;
+    if (incoming.every((m) => isNotice(m) && !patsMe(m, me))) { this.pending.get(name)?.incoming.push(...incoming); return; }
+    if (incoming.some((m) => patsMe(m, me))) log.info(`「${name}」有人拍了拍我`);
 
     const rule = matchRule(this.cfg, { chat: name, isGroup, messages: incoming });
     if (!rule || rule.action === 'ignore') { log.debug(`「${name}」未命中回复规则${rule ? `（${rule.id}: ignore）` : ''}`); return; }

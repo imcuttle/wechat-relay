@@ -7,6 +7,7 @@ import type { AgentConfig, AppConfig, ChatMessage, DebugSection, HarnessConfig, 
 import { promptText } from '@shared/prompt';
 import { DATA_DIR, expandEnv, knowledgeDirs, MEDIA_DIR, MEMORY_DIR } from '../config';
 import { dateText, errText, nowText, render, sleep } from '../util';
+import { NOTICE_SENDER, isNotice, noticeActor } from '../notice';
 import { popup } from '../popup';
 import { acpPool, type AcpSpec } from './acp';
 import { askGuide, askTool } from './ask';
@@ -38,6 +39,7 @@ export interface AgentOutput { reply: string | null; skipped: boolean; reason?: 
 const SKIP_RE = /^\s*\[?\s*(SKIP|NO_REPLY|不回复)\s*\]?\s*$/i;
 
 function speaker(m: ChatMessage, chat: string, isGroup: boolean): string {
+  if (isNotice(m)) return NOTICE_SENDER;
   return m.side === 'self' ? '我' : isGroup ? m.sender || '群成员' : chat;
 }
 
@@ -51,7 +53,7 @@ function systemPrompt(cfg: AppConfig, agent: AgentConfig, input: AgentInput): st
     chat: input.chat,
     group: input.isGroup,
     private: !input.isGroup,
-    sender: last ? speaker(last, input.chat, input.isGroup) : '',
+    sender: last ? (noticeActor(last, cfg.general.myNickname) ?? speaker(last, input.chat, input.isGroup)) : '',
     myNickname: cfg.general.myNickname || '我',
     now: dateText(),
   };
@@ -125,7 +127,7 @@ function turns(input: AgentInput, agent: AgentConfig, limit: number): Turn[] {
   };
   for (const m of msgs) {
     const role = m.side === 'self' ? 'assistant' : 'user';
-    const who = role === 'user' && input.isGroup ? `${m.sender || '群成员'}: ` : '';
+    const who = isNotice(m) ? `[${NOTICE_SENDER}] ` : role === 'user' && input.isGroup ? `${m.sender || '群成员'}: ` : '';
     if (!images.has(m)) { push(role, [{ type: 'text', text: who + m.text }]); continue; }
     const ocr = imageOcr(m);
     const label = `[图片${++n}]${ocr ? `（图中文字：${ocr}）` : ''}`;
@@ -143,11 +145,14 @@ function turns(input: AgentInput, agent: AgentConfig, limit: number): Turn[] {
   }
   if (mine.length) out[out.length - 1].parts.unshift(...mine);
   // Only the last turn varies between runs, so everything before it stays a cacheable prefix.
-  out[out.length - 1].parts.unshift({ type: 'text', text: timeNote() + (n ? `\n${IMAGE_NOTE}` : '') });
+  out[out.length - 1].parts.unshift({ type: 'text', text: timeNote() + (n ? `\n${IMAGE_NOTE}` : '') + (msgs.some(isNotice) ? `\n${NOTICE_NOTE}` : '') });
   return out;
 }
 
 const b64 = (path: string) => readFileSync(path).toString('base64');
+
+/** How to read the「系统提示」lines (拍一拍, 撤回 …) that are mixed into the conversation. */
+const NOTICE_NOTE = `（「${NOTICE_SENDER}」是微信的系统通知，如拍一拍、撤回消息、入群等，不是谁打的字。别人拍了拍你是一种轻互动，可以像真人一样自然回应，也可以不回复。）`;
 
 /** Images are screenshot crops: never blame them on loading problems, fall back to the OCR text instead. */
 const IMAGE_NOTE = '（图片是从聊天截图中裁剪的，标注里附有图中识别出的文字。如果某张图看不清，就根据图中文字和上下文理解，不要说图片没加载、黑屏或让对方重发。）';
@@ -199,6 +204,7 @@ function transcript(input: AgentInput, agent: AgentConfig, limit: number): strin
   const lines = input.history.slice(-limit).map((m) => `${speaker(m, input.chat, input.isGroup)}: ${lineText(m, agent)}`);
   return `以下是与「${input.chat}」的微信${input.isGroup ? '群聊' : '聊天'}记录（最后几条是需要你回复的新消息）：\n\n${lines.join('\n')}\n\n${timeNote()}\n` +
     `${agent.vision && lines.some((l) => l.includes('（图片文件：')) ? `图片消息附带了本地图片路径，需要时可以读取查看。${IMAGE_NOTE}\n` : ''}` +
+    `${input.history.slice(-limit).some(isNotice) ? `${NOTICE_NOTE}\n` : ''}` +
     `请直接输出要发送的回复正文，不要任何解释或前缀。如果不需要回复，只输出 [SKIP]。`;
 }
 
@@ -512,7 +518,7 @@ async function runAcp(cfg: AppConfig, h: HarnessConfig, agent: AgentConfig, syst
   const body = raw ?? transcript(input, agent, limit);
   const intro = codebuddy ? body : `${system}\n\n---\n\n${body}`;
   const followUp = task ? null
-    : `${timeNote()}\n新消息：\n${input.incoming.map((m) => `${speaker(m, input.chat, input.isGroup)}: ${lineText(m, agent)}`).join('\n')}\n\n请直接输出回复正文；不需要回复则只输出 [SKIP]。`;
+    : `${timeNote()}\n新消息：\n${input.incoming.map((m) => `${speaker(m, input.chat, input.isGroup)}: ${lineText(m, agent)}`).join('\n')}\n\n${input.incoming.some(isNotice) ? `${NOTICE_NOTE}\n` : ''}请直接输出回复正文；不需要回复则只输出 [SKIP]。`;
   const q = (a: string) => (/^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`);
   const cmd = [h.command, ...(codebuddy ? ['--acp'] : []), ...args];
   trace.push(`$ ${prewarmable(h) ? '(预热) ' : ''}${cmd.map((a) => (a.length > 60 ? `'${a.slice(0, 57)}…'` : a)).join(' ')}`);
