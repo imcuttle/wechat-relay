@@ -15,7 +15,7 @@ function Settings() {
       <Space>启用<Switch checked={config.skillsEnabled} onChange={(on) => void saveConfig((c) => { c.skillsEnabled = on; })} /></Space>
       <Typography.Paragraph type="secondary" style={{ fontSize: 12, margin: '10px 0 0' }}>
         开启后，系统提示词会附带 skill 索引和全局 / 会话 skill 的路径说明（<code>~/.wechat-relay/skills</code>）；
-        模型型智能体自动获得只限该目录的 Read / Write / Edit / Glob / Grep，Harness 用自己的同名工具。与「记忆」互相独立。
+        模型型智能体自动获得只限该目录的 Read / Write / Edit / Glob / Grep 和沙箱里的 Bash（家目录其他文件不可读、目录外不可写），Harness 用自己的同名工具。与「记忆」互相独立。
       </Typography.Paragraph>
     </Card>
   );

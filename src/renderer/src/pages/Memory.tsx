@@ -27,7 +27,7 @@ function Settings() {
       </Space>
       <Typography.Paragraph type="secondary" style={{ fontSize: 12, margin: '10px 0 0' }}>
         开启后，系统提示词会附带全局记忆索引，并说明全局 / 会话记忆的文件路径（<code>~/.wechat-relay/memory</code>）；
-        模型型智能体自动获得只限该目录的 Read / Write / Edit / Glob / Grep，Harness 用自己的同名工具。会话记忆不进索引，需要时由智能体读文件或 grep。
+        模型型智能体自动获得只限该目录的 Read / Write / Edit / Glob / Grep 和沙箱里的 Bash（家目录其他文件不可读、目录外不可写），Harness 用自己的同名工具。会话记忆不进索引，需要时由智能体读文件或 grep。
       </Typography.Paragraph>
     </Card>
   );

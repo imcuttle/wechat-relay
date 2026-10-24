@@ -97,7 +97,7 @@ const NATIVE_IN_HARNESS = new Set(['builtin:read', 'builtin:write', 'builtin:edi
 /**
  * Resolves an agent's tool list: builtin:*, custom tool ids, mcp:<server id>.
  * A tool is used only when the agent selects it AND it is enabled globally.
- * Model agents also get Read / Write / Edit / Glob / Grep limited to the memory / skill directories whenever either is
+ * Model agents also get Read / Write / Edit / Glob / Grep / Bash (sandboxed) limited to the memory / skill directories whenever either is
  * on (selected or not). For `harness` the result is what the proxy MCP server serves: no external MCP servers (they are
  * passed straight to the CLI) and no built-ins the CLI has itself.
  */

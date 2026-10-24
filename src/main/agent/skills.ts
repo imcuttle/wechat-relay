@@ -88,7 +88,7 @@ export function skillGuide(cfg: AppConfig, chat: string): string {
   if (!cfg.skillsEnabled) return '';
   const skills = activeSkills(cfg, chat);
   return `## Skill
-Skill 是可复用的操作指引，每个是一个目录里的 SKILL.md（开头有 name / description），用 Read / Glob / Grep 查看，用 Write / Edit 修改。
+Skill 是可复用的操作指引，每个是一个目录里的 SKILL.md（开头有 name / description），用 Read / Glob / Grep 查看，用 Write / Edit 修改；skill 目录里附带的脚本、批量文件操作用 Bash 执行。
 - 全局 skill：${globalSkillsDir()}/<id>/SKILL.md
 - 当前会话「${chat}」的 skill：${sessionSkillsDir(chat)}/<id>/SKILL.md（同 id 时覆盖全局）
 遇到相关场景时先 Read 对应 SKILL.md 再照做；发现流程值得沉淀时可以新建（Write，目录不存在会自动创建）或用 Edit 修改（全局通用的放全局，只对本会话有用的放会话目录）。

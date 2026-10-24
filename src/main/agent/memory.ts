@@ -54,7 +54,7 @@ export function memoryGuide(cfg: AppConfig, chat: string): string {
   ensureFiles(chat);
   const idx = globalIndex(cfg.memory.indexLimit);
   return `## 记忆
-记忆是普通 Markdown 文件，用 Read / Grep / Glob 查，用 Write / Edit 改（Edit 可用 start_line / end_line 按行修改）。路径规则：
+记忆是普通 Markdown 文件，用 Read / Grep / Glob 查，用 Write / Edit 改（Edit 可用 start_line / end_line 按行修改）；移动、重命名、批量处理可以用 Bash。路径规则：
 - 全局记忆（对所有会话都有用的信息：我的习惯、长期偏好、通用事实）：${globalMemoryFile()}
 - 当前会话「${chat}」的记忆（只和这个会话有关：对方的偏好、约定、进行中的事）：${sessionMemoryFile(chat)}
 - 其他会话的记忆在同目录 ${join(MEMORY_DIR, 'sessions')}/ 下，只用来查阅，不要改。

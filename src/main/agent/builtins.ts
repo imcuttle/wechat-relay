@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { mkdirSync, realpathSync } from 'node:fs';
 import { mkdir, readdir, readFile, stat, writeFile, appendFile, glob } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -45,6 +46,10 @@ function htmlToText(html: string): string {
     .replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
     .replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n\n').trim();
 }
+
+const bashTimeout = (v: unknown) => Math.min(600000, Math.max(1000, Number(v ?? 60000)));
+const bashResult = (r: ProcResult, timeoutMs: number) =>
+  clip([r.out && `stdout:\n${r.out}`, r.err && `stderr:\n${r.err}`, r.timedOut ? `超时（${timeoutMs}ms）已终止` : `exit ${r.code}`].filter(Boolean).join('\n'));
 
 const obj = (properties: Record<string, unknown>, required: string[] = []) => ({ type: 'object', properties, required });
 const PATH_HINT = '相对路径基于工作目录 ~/.wechat-relay/workspace，可用绝对路径或 ~/';
@@ -212,10 +217,8 @@ export const BUILTINS: Record<string, ToolImpl> = {
     }, ['command']),
     run: async (args) => {
       const cwd = resolvePath(args.cwd, await workspace());
-      const timeoutMs = Math.min(600000, Math.max(1000, Number(args.timeout_ms ?? 60000)));
-      const r = await runProcess('/bin/bash', ['-c', String(args.command ?? '')], { cwd, timeoutMs });
-      const parts = [r.out && `stdout:\n${r.out}`, r.err && `stderr:\n${r.err}`, r.timedOut ? `超时（${timeoutMs}ms）已终止` : `exit ${r.code}`];
-      return clip(parts.filter(Boolean).join('\n'));
+      const timeoutMs = bashTimeout(args.timeout_ms);
+      return bashResult(await runProcess('/bin/bash', ['-c', String(args.command ?? '')], { cwd, timeoutMs }), timeoutMs);
     },
   },
 };
@@ -224,14 +227,14 @@ export const BUILTINS: Record<string, ToolImpl> = {
 const inside = (dirs: string[], p: string) => dirs.some((d) => p === d || p.startsWith(d + sep));
 
 /**
- * read / glob / grep / write / edit limited to the given directories (memory and / or skills). They are added to an agent whenever
- * memory or skills are on, whether or not the unrestricted builtins are enabled: relative paths are based on the data
+ * read / glob / grep / write / edit and a sandboxed bash limited to the given directories (memory and / or skills). They
+ * are added to an agent whenever memory or skills are on, whether or not the unrestricted builtins are enabled: relative paths are based on the data
  * dir (`memory/global.md`), anything outside the two directories is refused.
  */
 export function scopedFileTools(dirs: string[]): ToolImpl[] {
   const SCOPE_HINT = `只能访问 ${dirs.map((d) => `~/.wechat-relay/${relative(DATA_DIR, d)}`).join('、')}，相对路径基于 ~/.wechat-relay`;
   const list: Array<[string, string]> = [['builtin:read', 'path'], ['builtin:glob', 'cwd'], ['builtin:grep', 'path'], ['builtin:write', 'path'], ['builtin:edit', 'path']];
-  return list.map(([id, key]) => {
+  const files = list.map(([id, key]): ToolImpl => {
     const t = BUILTINS[id];
     return {
       ...t,
@@ -256,4 +259,54 @@ export function scopedFileTools(dirs: string[]): ToolImpl[] {
       },
     };
   });
+  return [...files, scopedBash(dirs, SCOPE_HINT)];
+}
+
+/** Parent dirs of `p` up to '/': getcwd and `cd ..` need to list them (names only, the files in them stay unreadable). */
+function ancestors(p: string): string[] {
+  const out: string[] = [];
+  for (let d = dirname(p); d !== dirname(d); d = dirname(d)) out.push(d);
+  return out;
+}
+
+/**
+ * Bash for the memory / skill dirs (move, rename, batch edits, run a skill's scripts) under macOS sandbox-exec: inside
+ * the home dir and the data dir (config.yaml holds API keys) only the given dirs can be read; nothing but them and the
+ * temp dirs can be written. Runs with a minimal environment so keys in the app's own env do not leak either.
+ */
+function scopedBash(dirs: string[], hint: string): ToolImpl {
+  const t = BUILTINS['builtin:bash'];
+  // The sandbox matches resolved paths (/var → /private/var); the dirs must exist for realpath.
+  for (const d of dirs) mkdirSync(d, { recursive: true });
+  const home = realpathSync(homedir());
+  const data = realpathSync(DATA_DIR);
+  const real = dirs.map((d) => realpathSync(d));
+  const vals: string[] = [];
+  const ref = (v: string) => `(param "P${vals.push(v) - 1}")`;
+  const profile = [
+    '(version 1)',
+    '(allow default)',
+    '(deny file-write*)',
+    '(allow file-write* (subpath "/dev") (subpath "/private/tmp") (subpath "/private/var/folders"))',
+    `(deny file-read* (subpath ${ref(home)}) (subpath ${ref(data)}))`,
+    `(allow file-read* ${[...new Set([data, ...real.flatMap(ancestors)])].map((d) => `(literal ${ref(d)})`).join(' ')})`,
+    `(allow file-read* file-write* ${real.map((d) => `(subpath ${ref(d)})`).join(' ')})`,
+  ].join('\n');
+  const defs = vals.flatMap((v, i) => ['-D', `P${i}=${v}`]);
+  const env: NodeJS.ProcessEnv = {
+    PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+    HOME: home, USER: process.env.USER, LOGNAME: process.env.LOGNAME, SHELL: '/bin/bash',
+    LANG: process.env.LANG || 'en_US.UTF-8', TMPDIR: process.env.TMPDIR || '/tmp',
+  };
+  return {
+    ...t,
+    description: `在 bash 中执行命令（macOS 沙箱），适合移动 / 重命名 / 批量修改记忆和 skill 文件、运行 skill 目录里的脚本，返回 stdout / stderr / 退出码。${hint}；其他位置不可写，家目录里的其他文件不可读。默认工作目录 ~/.wechat-relay`,
+    run: async (args) => {
+      const cwd = resolvePath(args.cwd ?? '', DATA_DIR);
+      if (cwd !== DATA_DIR && !inside(dirs, cwd)) return `error: cwd 只能是 ~/.wechat-relay 或 ${dirs.join('、')}`;
+      const timeoutMs = bashTimeout(args.timeout_ms);
+      const r = await runProcess('/usr/bin/sandbox-exec', [...defs, '-p', profile, '/bin/bash', '-c', String(args.command ?? '')], { cwd, env, timeoutMs });
+      return bashResult(r, timeoutMs);
+    },
+  };
 }
