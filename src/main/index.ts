@@ -45,6 +45,13 @@ function createWindow(): void {
   else void win.loadFile(join(__dirname, '../renderer/index.html'));
   win.on('closed', () => { win = null; });
   win.webContents.on('preload-error', (_e, path, err) => log.error(`preload ${path}: ${err.message}`));
+  // A dead renderer leaves a blank window: record why and load the page again.
+  win.webContents.on('render-process-gone', (_e, d) => {
+    log.error(`界面进程退出（${d.reason}, code ${d.exitCode}），重新加载`);
+    if (d.reason !== 'clean-exit') setTimeout(() => { if (win && !win.isDestroyed()) win.webContents.reload(); }, 1000);
+  });
+  win.on('unresponsive', () => log.warn('界面无响应'));
+  win.on('responsive', () => log.info('界面恢复响应'));
   // stdout only: routing these through the logger would feed back into the renderer's log view.
   win.webContents.on('console-message', (e) => { if (e.level === 'error') console.error(`[renderer] ${e.message}`); });
   // Show without activating (used when started from scripts, so WeChat / the user's app keeps focus).

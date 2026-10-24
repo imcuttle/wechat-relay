@@ -135,5 +135,5 @@ function Shell() {
 }
 
 export default function App() {
-  return <RelayProvider><Shell /></RelayProvider>;
+  return <ErrorBoundary><RelayProvider><Shell /></RelayProvider></ErrorBoundary>;
 }
