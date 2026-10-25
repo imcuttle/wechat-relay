@@ -83,26 +83,34 @@ class AcpClient {
   static async start(spec: AcpSpec, sig: string, turn: AcpTurn): Promise<AcpClient> {
     const h = spec.harness;
     const note = (t: string) => { turn.trace.push(`ACP：${t}`); turn.debug?.push({ title: 'ACP 进程', text: t }); };
-    let child: ChildProcess | null = null;
-    let stderr: (() => string) | undefined;
-    const t0 = Date.now();
     if (spec.codebuddy && h.prewarm !== false) {
+      const t0 = Date.now();
       const taken = await prewarm.take({ id: h.id, command: h.command, cwd: spec.cwd, env: spec.env });
       if (taken.standby) {
         const a = await prewarm.activate(taken.standby, spec.cwd, spec.args);
-        if (a.child) { child = a.child; stderr = a.err; note(`预热${taken.info}，激活 ${Date.now() - t0}ms`); }
-        else note(`预热${taken.info}，但激活失败（${a.error}），改为冷启动`);
+        if (a.child) {
+          note(`预热${taken.info}，激活 ${Date.now() - t0}ms`);
+          try { return await AcpClient.init(spec, sig, turn, a.child, a.err); } catch (e) {
+            // A standby that dies right after activation must not fail the reply: retry once with a cold start.
+            note(`预热进程激活后不可用（${e instanceof Error ? e.message.split('\n')[0] : e}），改为冷启动`);
+            log.warn(`${h.id} 预热进程激活后不可用，改为冷启动：${e instanceof Error ? e.message : e}`);
+          }
+        } else note(`预热${taken.info}，但激活失败（${a.error}），改为冷启动`);
       } else note(`预热${taken.info}，改为冷启动`);
     }
-    if (!child) {
-      const args = spec.codebuddy ? ['--acp', ...spec.args] : spec.args;
-      child = spawn(h.command, args, { cwd: spec.cwd, env: spec.env, stdio: ['pipe', 'pipe', 'pipe'] });
-      let err = '';
-      child.stderr!.setEncoding('utf8').on('data', (d: string) => { err = (err + d).slice(-4000); });
-      stderr = () => err;
-    }
+    const args = spec.codebuddy ? ['--acp', ...spec.args] : spec.args;
+    const child = spawn(h.command, args, { cwd: spec.cwd, env: spec.env, stdio: ['pipe', 'pipe', 'pipe'] });
+    let err = '';
+    child.stderr!.setEncoding('utf8').on('data', (d: string) => { err = (err + d).slice(-4000); });
+    return AcpClient.init(spec, sig, turn, child, () => err);
+  }
+
+  /** Wires the process and runs `initialize`; the process is disposed when that fails. */
+  private static async init(spec: AcpSpec, sig: string, turn: AcpTurn, child: ChildProcess, stderr: () => string): Promise<AcpClient> {
+    const h = spec.harness;
+    const t0 = Date.now();
     const c = new AcpClient(spec, sig, child);
-    c.stderr = stderr!;
+    c.stderr = stderr;
     c.wire();
     try {
       if (spec.tools.length) {

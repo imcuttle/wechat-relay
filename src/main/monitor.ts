@@ -85,19 +85,48 @@ function toMessage(m: Seen): ChatMessage {
 
 /**
  * Returns the index in `visible` where unseen messages start, or -1 when the screen does not overlap the stored tail.
- * The overlap must reach back to the top of the screen or cover at least 3 messages.
+ * The overlap must reach back to the top of the screen or cover at least 3 messages. One message inside the overlap
+ * (not the bottom one) may be OCR'd differently from the record (e.g.「在门口火锅吃点」vs「在门 必锅吃点」) as long as
+ * at least 3 others match exactly; otherwise such a misread forces a resync that re-appends the whole screen.
  */
 export function newStart(stored: ChatMessage[], visible: ChatMessage[]): number {
   if (!stored.length) return -1;
   for (let b = visible.length; b >= 1; b--) {
-    let m = 0;
-    while (m < b && m < stored.length && sameMsg(visible[b - 1 - m], stored[stored.length - 1 - m])) m++;
-    if (m >= Math.min(b, 3) && m > 0) return b;
+    let m = 0, miss = 0;
+    while (m < b && m < stored.length) {
+      const v = visible[b - 1 - m], s = stored[stored.length - 1 - m];
+      if (sameMsg(v, s)) m++;
+      else if (m > 0 && !miss && v.side === s.side && similarity(stripMark(v.text), stripMark(s.text)) >= 0.5) { miss++; m++; }
+      else break;
+    }
+    if (m > 0 && m - miss >= (miss ? 3 : Math.min(b, 3))) return b;
   }
   return -1;
 }
 
 const plain = <T extends { kind?: string }>(xs: T[]) => xs.filter((m) => !isNotice(m));
+
+/**
+ * Last resort when `startOf` finds no overlap (the stored tail holds an OCR fragment that is not on screen, the screen
+ * shows only part of the recent history, …): anchor on the bottom-most visible message that is also among the recently
+ * stored ones; everything below it is new. Without this a resync treats the whole screen as old and silently swallows a
+ * message that just arrived in the open chat. Trailing messages that merely look like a garbled copy of a recent stored
+ * message are not counted as new. Returns -1 when there is no anchor.
+ */
+export function anchorStart(stored: ChatMessage[], visible: ChatMessage[]): number {
+  const tail = plain(stored).slice(-30);
+  const real = (m: { text: string }) => normText(stripMark(m.text)).trim() !== '';
+  for (let i = visible.length - 1; i >= 0; i--) {
+    const v = visible[i];
+    if (isNotice(v) || !real(v)) continue;
+    if (!tail.some((s) => real(s) && sameMsg(v, s))) continue;
+    let start = i + 1;
+    const recent = tail.slice(-10);
+    while (start < visible.length && !isNotice(visible[start]) && recent.some((s) => s.side === visible[start].side && real(s) && similarity(stripMark(visible[start].text), stripMark(s.text)) >= 0.6)) start++;
+    return start;
+  }
+  return -1;
+}
 
 /**
  * newStart, tolerating notices that are on screen but not in the records (history stored before notices were kept, or
@@ -120,6 +149,7 @@ function startOf(stored: ChatMessage[], visible: ChatMessage[]): number {
 /**
  * True when the screen matches a run of stored messages that ends before the stored tail, i.e. the chat is scrolled up
  * to older, already recorded content. Such a screen has nothing new and must not trigger a resync (duplicates).
+ * The run must reach the bottom of the screen: unrecorded messages below it mean the screen is at the latest content.
  */
 export function scrolledBack(stored: ChatMessage[], visible: ChatMessage[]): boolean {
   const need = Math.min(3, visible.length);
@@ -128,7 +158,7 @@ export function scrolledBack(stored: ChatMessage[], visible: ChatMessage[]): boo
     for (let j = 0; j + need <= stored.length; j++) {
       let k = 0;
       while (i + k < visible.length && j + k < stored.length && sameMsg(visible[i + k], stored[j + k])) k++;
-      if (k >= need && j + k < stored.length) return true;
+      if (k >= need && i + k === visible.length && j + k < stored.length) return true;
     }
   }
   return false;
@@ -412,6 +442,13 @@ export class Monitor extends EventEmitter {
     if (start < 0 && state.messages.length && (scrolledBack(state.messages, visible) || scrolledBack(plain(state.messages), plain(visible)))) {
       log.debug(`「${name}」屏幕显示的是已记录的较早内容（可能在向上翻看历史），跳过`);
       return;
+    }
+    if (start < 0 && state.messages.length) {
+      const anchor = anchorStart(state.messages, visible);
+      if (anchor >= 0) {
+        start = anchor;
+        if (anchor < visible.length) log.info(`「${name}」屏幕与记录对不齐，按最近一条已记录的消息定位，其后 ${visible.length - anchor} 条视为新消息`);
+      }
     }
     const resync = start < 0;
     if (resync) {

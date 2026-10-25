@@ -257,7 +257,23 @@ func analyze(path: String, scaleHint: Double?) -> Result {
     }
 
     // --- Input box: a bordered box (light and dark) above the 发送/Send button.
-    let sendLine = chatLines.filter { ["发送", "Send", "發送"].contains($0.text.trimmingCharacters(in: .whitespaces)) && $0.y > Double(H) * 0.5 }.max(by: { $0.y < $1.y })
+    // OCR sometimes merges the button's icon into the label ("③发送"): accept up to 3 stray symbol characters before it.
+    func sendLabel(_ l: Line) -> String? {
+        let t = l.text.trimmingCharacters(in: .whitespaces)
+        for k in ["发送", "Send", "發送"] where t.hasSuffix(k) {
+            let prefix = t.dropLast(k.count)
+            if prefix.count <= 3 && prefix.allSatisfy({ !$0.isLetter && !$0.isNumber || "①②③④⑤⑥⑦⑧⑨".contains($0) }) { return k }
+        }
+        return nil
+    }
+    let sendLine = chatLines.filter { sendLabel($0) != nil && $0.y > Double(H) * 0.5 }.max(by: { $0.y < $1.y })
+        .map { l -> Line in
+            // Centre on the label itself, not on the icon + label.
+            let t = l.text.trimmingCharacters(in: .whitespaces), k = sendLabel(l)!
+            guard t.count > k.count else { return l }
+            var m = l; m.w = l.w * Double(k.count) / Double(t.count); m.x = l.maxX - m.w
+            return m
+        }
     var inputTop = Int(Double(H) * 0.75)
     do {
         let xs = Array(stride(from: chatLeft + pt(30), to: chatRight - pt(30), by: 3))
