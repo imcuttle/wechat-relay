@@ -70,7 +70,10 @@ class AcpClient {
   private rpc = new Map<number, Rpc>();
   private seq = 0;
   private buf = '';
+  private stray = '';
   private stderr: () => string = () => '';
+  /** stderr plus non-JSON stdout lines: some CLI errors are printed on stdout. */
+  private diag(): string { return `${this.stderr()}${this.stray}`; }
   private loadSession = false;
   private state: TurnState | null = null;
   private idle: NodeJS.Timeout | undefined;
@@ -130,7 +133,7 @@ class AcpClient {
       log.info(`${h.id} 已启动（pid ${child.pid}，${Date.now() - t0}ms，cwd ${spec.cwd}）`);
     } catch (e) {
       c.dispose();
-      throw new Error(`ACP 初始化失败：${errText(e)}${c.stderr().trim() ? `\n${short(c.stderr().trim().slice(-400), 400)}` : ''}`);
+      throw new Error(`ACP 初始化失败：${errText(e)}${c.diag().trim() ? `\n${short(c.diag().trim().slice(-400), 400)}` : ''}`);
     }
     return c;
   }
@@ -144,13 +147,13 @@ class AcpClient {
         this.buf = this.buf.slice(nl + 1);
         if (!line) continue;
         let m: any;
-        try { m = JSON.parse(line); } catch { continue; } // stray log output
+        try { m = JSON.parse(line); } catch { this.stray = (this.stray + line + '\n').slice(-1000); continue; } // stray log output, kept for error messages
         this.onMessage(m);
       }
     });
     child.stdin!.on('error', () => { /* process gone: reported by exit */ });
     child.on('error', (e) => this.fail(`ACP 进程启动失败：${e.message}`));
-    child.on('exit', (code, signal) => this.fail(`ACP 进程已退出（${signal ?? `exit ${code}`}）${this.stderr().trim() ? `：${short(this.stderr().trim().slice(-300), 300)}` : ''}`));
+    child.on('exit', (code, signal) => this.fail(`ACP 进程已退出（${signal ?? `exit ${code}`}）${this.diag().trim() ? `：${short(this.diag().trim().slice(-300), 300)}` : ''}`));
   }
 
   private fail(why: string): void {
