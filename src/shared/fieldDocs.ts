@@ -160,6 +160,24 @@ export const CONFIG_DOCS: Record<string, SectionDoc> = {
       imageDetail: { type: '字符串', def: 'low', desc: '图片精度（OpenAI 风格）。', values: { low: '最省 token', high: '更清晰但更贵', auto: '由模型决定' } },
     },
   },
+  apps: {
+    title: '监听的聊天软件', desc: '可同时监听多个 App，互不干扰；规则的 match.apps 限定作用于哪些 App。写法：apps.wechat / apps.wecom。',
+    fields: {
+      wechat: { type: '对象', desc: '微信。enabled: 是否监听。' },
+      wecom: { type: '对象', desc: '企微（通过辅助功能树后台读取会话列表，不抢焦点、窗口可隐藏在托盘）。enabled 是否监听；nickname 你在企微里的名字（如 zhangsan），用于识别群里 @我；pollIntervalMs 读取会话列表的间隔。目前只支持脚本动作，不支持 AI 回复和发送。' },
+    },
+  },
+  scripts: {
+    title: '脚本', desc: 'TypeScript 脚本，代码在 ~/.wechat-relay/scripts/<id>/index.ts（在「脚本」页或 VS Code 里编辑），这里只保存开关。规则 action: script + script: <id> 触发。', list: true,
+    fields: {
+      id: { type: '字符串', desc: '唯一标识，也是脚本文件夹名。' },
+      name: { type: '字符串', desc: '界面显示名称。' },
+      description: { type: '字符串', desc: '说明。' },
+      enabled: { type: 'true / false', def: 'true', desc: '是否启用。停用后指向它的规则不再生效。' },
+      timeoutMs: { type: '毫秒', def: '120000', desc: '单次运行超过这个时间就终止。' },
+      dependencies: { type: '键值', desc: 'npm 依赖（包名: 版本），保存时在脚本文件夹里 npm install。' },
+    },
+  },
   rules: {
     title: '回复规则', desc: '决定「回不回复谁」。按从上到下的顺序匹配，第一条命中的生效。', list: true,
     fields: {
@@ -167,7 +185,8 @@ export const CONFIG_DOCS: Record<string, SectionDoc> = {
       name: { type: '字符串', desc: '界面显示名称。' },
       enabled: { type: 'true / false', def: 'true', desc: '是否启用这条规则。' },
       match: { type: '对象', desc: '匹配条件，所有写出的条件需同时满足。可用字段见下方 match 说明。' },
-      action: { type: '字符串', desc: '命中后的动作。', values: { reply: '交给智能体回复', ignore: '忽略，不回复' } },
+      action: { type: '字符串', desc: '命中后的动作。', values: { reply: '交给智能体回复', script: '交给 TypeScript 脚本处理（不走 AI 回复）', ignore: '忽略，不回复' } },
+      script: { type: '字符串', desc: '（action=script）脚本 id，对应 scripts 里的条目。' },
       agent: { type: '字符串', desc: '（action=reply）负责回复的智能体 id，不填用第一个智能体。' },
       mode: { type: '字符串', def: 'inherit', desc: '覆盖通用设置里的 mode。', values: { inherit: '沿用 general.mode', auto: '直接发送', review: '生成草稿待审核' } },
       cooldownSec: { type: '秒', def: '0', desc: '同一会话命中这条规则后，多少秒内不再自动回复。' },
@@ -176,6 +195,7 @@ export const CONFIG_DOCS: Record<string, SectionDoc> = {
   'rules.match': {
     title: '规则匹配条件', desc: 'rules[].match 里可以写的条件。',
     fields: {
+      apps: { type: '列表', desc: '作用于哪些聊天软件（可多选）。不写 = 所有 App。', values: { wechat: '微信', wecom: '企微' }, example: '[wecom]' },
       chats: { type: '列表', desc: '会话名（备注名 / 群名）。支持精确匹配、* 通配符、/正则/。不写 = 所有会话。', example: '[老婆, 订阅号*, /项目.*群/]' },
       excludeChats: { type: '列表', desc: '排除的会话名，写法同 chats。' },
       chatType: { type: '字符串', desc: '会话类型。', values: { any: '不限', private: '仅私聊', group: '仅群聊' } },

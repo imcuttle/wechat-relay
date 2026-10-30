@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ChatMessage, ChatSummary, Draft, Persona, ReplyMode } from '@shared/types';
+import { appOfChat } from '@shared/types';
 import { DATA_DIR } from './config';
 import { isNoiseText } from './util';
 
@@ -85,7 +86,7 @@ class Store {
     return Object.entries(this.s.chats)
       .map(([name, c]) => {
         const last = c.messages[c.messages.length - 1];
-        return { name, isGroup: c.isGroup, paused: c.paused, count: c.messages.length, lastAt: last?.at ?? 0, lastText: last?.image ? '[图片]' : last?.text ?? '', mode: (c.mode ?? 'inherit') as ReplyMode | 'inherit', ask: c.ask === undefined ? 'inherit' as const : c.ask ? 'on' as const : 'off' as const, persona: c.persona ? { enabled: c.persona.enabled, prompt: c.persona.prompt } : undefined };
+        return { name, app: appOfChat(name), isGroup: c.isGroup, paused: c.paused, count: c.messages.length, lastAt: last?.at ?? 0, lastText: last?.image ? '[图片]' : last?.text ?? '', mode: (c.mode ?? 'inherit') as ReplyMode | 'inherit', ask: c.ask === undefined ? 'inherit' as const : c.ask ? 'on' as const : 'off' as const, persona: c.persona ? { enabled: c.persona.enabled, prompt: c.persona.prompt } : undefined };
       })
       .sort((a, b) => b.lastAt - a.lastAt);
   }

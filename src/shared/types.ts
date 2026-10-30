@@ -3,6 +3,26 @@
 export type ChatType = 'any' | 'private' | 'group';
 export type ReplyMode = 'auto' | 'review';
 
+/** Chat apps that can be monitored at the same time. */
+export type AppId = 'wechat' | 'wecom';
+export const APP_IDS: AppId[] = ['wechat', 'wecom'];
+export const APP_LABELS: Record<AppId, string> = { wechat: '微信', wecom: '企微' };
+/** Chat records of apps other than WeChat are stored under "<prefix><chat name>" (WeChat keeps the bare name). */
+export const APP_PREFIX: Record<AppId, string> = { wechat: '', wecom: '企微·' };
+export const appOfChat = (key: string): AppId => (key.startsWith(APP_PREFIX.wecom) ? 'wecom' : 'wechat');
+export const chatKey = (app: AppId, name: string): string => `${APP_PREFIX[app]}${name}`;
+export const chatName = (key: string): string => key.slice(APP_PREFIX[appOfChat(key)].length);
+
+export interface AppSettings {
+  /** The app is watched (started with the monitor). */
+  enabled: boolean;
+  /** Your nickname in this app, used to detect @mentions (falls back to general.myNickname). */
+  nickname?: string;
+  /** wecom: milliseconds between two reads of the session list. */
+  pollIntervalMs?: number;
+}
+export type AppsConfig = Record<AppId, AppSettings>;
+
 export interface GeneralConfig {
   /** Master switch for sending replies (monitoring still runs when false). */
   autoReply: boolean;
@@ -200,6 +220,20 @@ export interface ToolConfig {
   timeoutMs: number;
 }
 
+/**
+ * A user script (`~/.wechat-relay/scripts/<id>/index.ts`), run by rules with `action: script`. The code lives in the file
+ * (edit it in the app or in VS Code); the config only holds its switches.
+ */
+export interface ScriptConfig {
+  id: string;
+  name?: string;
+  description?: string;
+  enabled: boolean;
+  timeoutMs: number;
+  /** npm dependencies (package.json format), installed when the script is saved / first run. */
+  dependencies?: Record<string, string>;
+}
+
 export interface McpServerConfig {
   id: string;
   /** stdio */
@@ -258,6 +292,8 @@ export interface AgentConfig {
 }
 
 export interface RuleMatch {
+  /** Apps this rule applies to (multi-select). Empty / absent = every app. */
+  apps?: AppId[];
   /** Chat names: exact, `*` wildcard or /regex/. Empty = all chats. */
   chats?: string[];
   excludeChats?: string[];
@@ -276,7 +312,10 @@ export interface RuleConfig {
   name?: string;
   enabled: boolean;
   match: RuleMatch;
-  action: 'reply' | 'ignore';
+  /** reply = an agent drafts / sends a reply; ignore = nothing; script = hand the new messages to a script. */
+  action: 'reply' | 'ignore' | 'script';
+  /** action=script: id of the script. */
+  script?: string;
   agent?: string;
   /** Overrides general.mode for this rule. */
   mode?: ReplyMode | 'inherit';
@@ -288,6 +327,8 @@ export interface RuleConfig {
 export interface AppConfig {
   general: GeneralConfig;
   driver: DriverConfig;
+  apps: AppsConfig;
+  scripts: ScriptConfig[];
   providers: ProviderConfig[];
   harnesses: HarnessConfig[];
   /** builtin:<name> → enabled (see shared/builtins.ts for defaults). */
@@ -396,7 +437,9 @@ export interface SyncOptions {
 }
 
 export interface ChatSummary {
+  /** Record key (see chatKey). */
   name: string;
+  app: AppId;
   isGroup: boolean;
   lastAt: number;
   lastText: string;
@@ -432,6 +475,7 @@ export interface LogEntry {
 }
 
 export interface MonitorStatus {
+  app: AppId;
   running: boolean;
   driver: 'stopped' | 'starting' | 'ready' | 'error';
   driverError?: string;
@@ -444,6 +488,18 @@ export interface MonitorStatus {
   replies: number;
   busy: boolean;
   configPath: string;
+}
+
+/** One row of an app's session list as last read (apps without screenshots, i.e. wecom). */
+export interface SessionRow {
+  name: string;
+  preview: string;
+  sender?: string;
+  isGroup: boolean;
+  unread: number;
+  mentioned: boolean;
+  draft: boolean;
+  time: string;
 }
 
 export interface Snapshot {
@@ -479,15 +535,22 @@ export type RelayEvent =
   | { type: 'status'; status: MonitorStatus }
   | { type: 'log'; entry: LogEntry }
   | { type: 'snapshot'; snapshot: Snapshot }
+  | { type: 'sessions'; app: AppId; at: number; sessions: SessionRow[]; /** Raw accessibility tree (markdown) of the window just read. */ tree?: string }
   | { type: 'chat'; chat: string; message?: ChatMessage }
   | { type: 'draft'; draft: Draft }
   | { type: 'config'; config: AppConfig };
 
+/** Test run of a script with a made-up message (dry run: scripts must not change anything outside). */
+export interface ScriptTestRequest { id: string; app: AppId; chat: string; isGroup: boolean; sender?: string; text: string; dryRun: boolean }
+export interface ScriptTestResult { ok: boolean; result?: string; error?: string; logs: string[]; ms: number }
+
 export interface RelayApi {
-  getStatus(): Promise<MonitorStatus>;
-  start(): Promise<void>;
-  stop(): Promise<void>;
-  tickOnce(): Promise<void>;
+  /** Status of every app. */
+  getStatus(): Promise<MonitorStatus[]>;
+  /** app omitted = every enabled app. */
+  start(app?: AppId): Promise<void>;
+  stop(app?: AppId): Promise<void>;
+  tickOnce(app?: AppId): Promise<void>;
   getConfig(): Promise<AppConfig>;
   saveConfig(config: AppConfig): Promise<void>;
   getConfigYaml(): Promise<string>;
@@ -527,6 +590,15 @@ export interface RelayApi {
   listMcpTools(serverId: string): Promise<Array<{ name: string; description?: string }>>;
   /** Writes a script tool's files and installs its dependencies; rejects with the npm output on failure. */
   prepareTool(tool: ToolConfig): Promise<void>;
+  // ---- Scripts ----
+  /** Source of a script (the template when the file does not exist yet); also writes the support files (types, tsconfig). */
+  readScript(id: string): Promise<string>;
+  /** Writes index.ts and installs the dependencies; rejects with the npm output on failure. */
+  writeScript(script: ScriptConfig, code: string): Promise<void>;
+  /** .d.ts files the editor needs: the SDK plus @types/* installed in the script's folder. path → content. */
+  scriptTypings(id: string): Promise<Record<string, string>>;
+  openScript(id: string, how: 'vscode' | 'folder'): Promise<void>;
+  testScript(req: ScriptTestRequest): Promise<ScriptTestResult>;
   /** Memory files: the global one plus one per chat that has any. */
   listMemory(): Promise<MemorySummary[]>;
   readMemory(scope: 'global' | 'session', chat?: string): Promise<string>;

@@ -25,6 +25,13 @@
 - 模型型智能体会自动获得只限已开启目录的 `Read` / `Glob` / `Grep` / `Write` / `Edit`（无视「内置工具」开关）；Harness 用自己的同名工具，并通过本机代理 MCP 获得勾选的时间 / 聊天记录 / 不回复和自定义工具，同时关闭 CLI 自带的 Auto Memory。
 - 「做梦」：记忆页手动触发，或每个会话新增 N 条消息后自动让智能体整理合并记忆（整理前原文件备份为 `*.bak`）。
 
+## 多 App 与脚本
+
+- **同时监听微信和企业微信**：顶栏每个 App 一个开关（配置里是 `apps.wechat.enabled` / `apps.wecom.enabled`），各自独立轮询、互不干扰；前台发送、剪贴板由全局锁串行。规则的 `match.apps`（可多选，空 = 全部）决定规则作用于哪些 App。
+- **企业微信**：通过 Cua Driver 读取辅助功能树里的会话列表（不抢焦点，主窗口可以隐藏在托盘里），某个会话的未读数增加时，把列表里的最后一条消息当作新消息交给规则；一次轮询内连发多条时只看得到最后一条（`ev.missed` 给出漏掉的条数）。目前企业微信只支持「脚本」动作，不支持 AI 回复和发送；屏幕锁定时系统会隐藏所有窗口，暂停读取，解锁后自动补上。群聊 @我 需要在 `apps.wecom.nickname` 填你的名字（如 `zhangsan`）。
+- **脚本**：规则动作选「脚本」，命中后新消息交给 `~/.wechat-relay/scripts/<id>/index.ts`。在独立的 Node 进程里运行（优先用 PATH 里的 Node ≥ 22.18，否则用应用内置的 Electron）：可以 `import` 任意 Node 内置模块和 npm 包、读写文件、执行命令；`api` 提供发消息（`api.chat.send` / `api.send`）、调智能体（`api.ai.complete` / `api.ai.reply`）、`api.ask` 弹窗询问、`api.ocr`、`api.notify`、`api.clipboard`、`api.exec`、持久化 `api.state`、互斥 `api.lock`。「脚本」页用 Monaco 编辑，有完整类型提示（SDK 类型来自 `src/shared/scriptSdk.ts`，同时写入脚本目录的 `relay.d.ts`，可用「在 VS Code 打开」直接编辑）；「试运行」用假消息跑一遍，`ev.dryRun` 为真时 `api.send` 会被跳过。
+- 示例：用脚本识别消息里的 PR 链接并自动 approve，不回复消息（鉴权、接口由脚本自己决定）。
+
 ## 环境要求
 
 - macOS，电脑版微信 4.x，微信主窗口保持打开（可以在后台，不要最小化）

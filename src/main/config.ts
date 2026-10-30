@@ -10,6 +10,8 @@ export const DATA_DIR = process.env.WECHAT_RELAY_HOME || join(homedir(), '.wecha
 export const CONFIG_PATH = join(DATA_DIR, 'config.yaml');
 /** Script tools: one npm package per tool (package.json + index.ts + node_modules). */
 export const TOOLS_DIR = join(DATA_DIR, 'tools');
+/** User scripts: one folder per script (index.ts, package.json, tsconfig.json, relay.d.ts, state.json). */
+export const SCRIPTS_DIR = join(DATA_DIR, 'scripts');
 /** Default cwd / base of relative paths for the file and shell built-in tools. */
 export const WORKSPACE_DIR = join(DATA_DIR, 'workspace');
 /** Screenshots are rewritten every poll; keep them out of the data dir. */
@@ -46,6 +48,16 @@ driver:
   command: auto             # auto = 使用 CodeBuddy 内置的 cua-driver
   args: []
   deliveryMode: background  # foreground = 先后台发送，失败或需要搜索时才等你空闲 3 秒，把微信短暂切到前台用快捷键发送，再切回原应用
+
+apps:                       # 要监听的聊天软件，可同时监听，互不干扰；规则里用 match.apps 指定作用于哪些
+  wechat:
+    enabled: true
+  wecom:
+    enabled: false          # 企业微信：通过辅助功能树读取会话列表（不抢焦点、不需要窗口在前台）
+    nickname: ""            # 你在企业微信里的名字（如 zhangsan），用于识别群里 @我；空 = 用 general.myNickname
+    pollIntervalMs: 3000
+
+scripts: []                 # TypeScript 脚本，在「脚本」页管理；规则 action: script + script: <id> 触发
 
 providers:
   - id: deepseek
@@ -193,6 +205,11 @@ function normalize(raw: Partial<AppConfig> | null | undefined): AppConfig {
   return {
     general: { ...DEFAULTS.general, ...(c.general ?? {}) },
     driver: { ...DEFAULTS.driver, ...(c.driver ?? {}) },
+    apps: {
+      wechat: { ...DEFAULTS.apps.wechat, ...(c.apps?.wechat ?? {}) },
+      wecom: { ...DEFAULTS.apps.wecom, ...(c.apps?.wecom ?? {}) },
+    },
+    scripts: withDefaults(arr(c.scripts), { enabled: true, timeoutMs: 120000 }),
     providers: withDefaults(arr(c.providers), { type: 'openai', apiKey: '' }),
     harnesses: withDefaults(arr(c.harnesses), { args: [], timeoutMs: 180000, sessionPerChat: true, idleMinutes: 10, passMcpServers: true, toolProxy: true, disableNativeMemory: true, prewarm: true }).map(migrateHarness),
     builtinTools: {

@@ -2,6 +2,7 @@ import { useContext, useEffect, useRef } from 'react';
 import Editor, { loader, type EditorProps } from '@monaco-editor/react';
 import * as monaco from 'monaco-editor';
 import { docAt, docMarkdown, keysAt } from '@shared/fieldDocs';
+import { SDK_DTS } from '@shared/scriptSdk';
 import { PageVisit } from '../pageVisit';
 import EditorWorker from 'monaco-editor/editor/editor.worker?worker';
 import JsonWorker from 'monaco-editor/language/json/json.worker?worker';
@@ -11,9 +12,37 @@ import TsWorker from 'monaco-editor/language/typescript/ts.worker?worker';
 self.MonacoEnvironment = {
   getWorker: (_: string, label: string) => (label === 'json' ? new JsonWorker() : label === 'typescript' || label === 'javascript' ? new TsWorker() : new EditorWorker()),
 };
-// Script tools import npm packages the editor cannot resolve: keep syntax errors, skip type checking.
-monaco.typescript.typescriptDefaults.setDiagnosticsOptions({ noSemanticValidation: true });
-monaco.typescript.typescriptDefaults.setCompilerOptions({ target: monaco.typescript.ScriptTarget.ESNext, module: monaco.typescript.ModuleKind.ESNext, allowNonTsExtensions: true });
+// Script tools / scripts import npm packages the editor cannot resolve: keep type checking, but ignore unresolved modules
+// (2307 / 2792 / 7016) and implicit any. Types come from extra libs: the script SDK, Node's own (loaded on demand) and the
+// @types of a script's folder (setScriptTypings).
+const ts = monaco.typescript;
+ts.typescriptDefaults.setDiagnosticsOptions({ noSemanticValidation: false, noSyntaxValidation: false, diagnosticCodesToIgnore: [2307, 2792, 7016, 1479] });
+ts.typescriptDefaults.setCompilerOptions({
+  target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext, moduleResolution: ts.ModuleResolutionKind.NodeJs,
+  allowNonTsExtensions: true, strict: true, noImplicitAny: false, esModuleInterop: true, allowSyntheticDefaultImports: true, skipLibCheck: true,
+});
+ts.typescriptDefaults.addExtraLib(SDK_DTS, 'file:///relay-sdk.d.ts');
+
+// Node's typings (@types/node + undici-types) are bundled lazily: a separate chunk, registered the first time a TypeScript editor opens.
+const nodeTypings = import.meta.glob(['../../../../node_modules/@types/node/**/*.d.ts', '../../../../node_modules/undici-types/**/*.d.ts'], { query: '?raw', import: 'default' }) as Record<string, () => Promise<string>>;
+let nodeTypesLoaded: Promise<void> | null = null;
+function ensureNodeTypes(): Promise<void> {
+  return (nodeTypesLoaded ??= (async () => {
+    await Promise.all(Object.entries(nodeTypings).map(async ([path, load]) => {
+      ts.typescriptDefaults.addExtraLib(await load(), `file:///${path.slice(path.indexOf('node_modules/'))}`);
+    }));
+  })());
+}
+
+const scriptLibs = new Map<string, string>();
+/** Registers .d.ts files (uri → text) of a script folder; unchanged files are skipped. */
+export function setScriptTypings(files: Record<string, string>): void {
+  for (const [uri, text] of Object.entries(files)) {
+    if (scriptLibs.get(uri) === text) continue;
+    scriptLibs.set(uri, text);
+    ts.typescriptDefaults.addExtraLib(text, uri);
+  }
+}
 loader.config({ monaco });
 
 // Monaco finishes some async work (hover, completion, TS worker) after its editor was disposed (modal closed, page
@@ -52,6 +81,8 @@ interface Props {
   value?: string;
   onChange?: (v: string) => void;
   language?: string;
+  /** Model path (file:///…): gives TypeScript a file name so imports / @types resolve like in a project. */
+  path?: string;
   height?: number | string;
   options?: EditorProps['options'];
   onSave?: () => void;
@@ -60,7 +91,7 @@ interface Props {
 }
 
 /** VS Code editor (Monaco). Works as a controlled antd Form control. */
-export default function CodeEditor({ value, onChange, language = 'plaintext', height = 200, options, onSave, onReady }: Props) {
+export default function CodeEditor({ value, onChange, language = 'plaintext', path, height = 200, options, onSave, onReady }: Props) {
   // The editor is created asynchronously and disposed on unmount (modal closed, page switched): never touch it after that,
   // and keep the latest callbacks in refs (the Ctrl+S command is registered only once).
   const alive = useRef(true);
@@ -72,14 +103,16 @@ export default function CodeEditor({ value, onChange, language = 'plaintext', he
   const visit = useContext(PageVisit);
   useEffect(() => {
     alive.current = true;
+    if (language === 'typescript') void ensureNodeTypes();
     return () => { alive.current = false; readyRef.current?.(null); };
-  }, []);
+  }, [language]);
   return (
     <div style={{ border: '1px solid #e5e7eb', borderRadius: 6, overflow: 'hidden', height }}>
       <Editor
         key={visit}
         value={value ?? ''}
         language={language}
+        path={path}
         height="100%"
         theme="vs"
         onChange={(v) => onChange?.(v ?? '')}

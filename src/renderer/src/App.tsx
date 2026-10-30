@@ -1,6 +1,7 @@
 import { Activity as KeepAlive, useState, type ReactElement } from 'react';
 import { App as AntApp, Badge, Button, Layout, Menu, Segmented, Space, Switch, Tag, Tooltip, Typography } from 'antd';
-import { Activity, Bot, Brain, Code, Cpu, FileText, Sparkles, Inbox, ListFilter, MessagesSquare, Play, ScrollText, Square, Wrench } from 'lucide-react';
+import { Activity, Bot, Brain, Code, Cpu, FileCode, FileText, Sparkles, Inbox, ListFilter, MessagesSquare, Play, ScrollText, Square, Wrench } from 'lucide-react';
+import { APP_IDS, APP_LABELS } from '@shared/types';
 import ErrorBoundary from './components/ErrorBoundary';
 import { PageVisit } from './pageVisit';
 import { RelayProvider, errMsg, useRelay } from './relay';
@@ -11,6 +12,7 @@ import Rules from './pages/Rules';
 import Agents from './pages/Agents';
 import Providers from './pages/Providers';
 import Tools from './pages/Tools';
+import Scripts from './pages/Scripts';
 import Prompts from './pages/Prompts';
 import Memory from './pages/Memory';
 import Skills from './pages/Skills';
@@ -21,7 +23,7 @@ const { Sider, Header, Content } = Layout;
 const icon = (I: typeof Activity) => <I size={16} />;
 
 function Shell() {
-  const { status, config, drafts, saveConfig } = useRelay();
+  const { status, statuses, config, drafts, saveConfig } = useRelay();
   const { message } = AntApp.useApp();
   const [page, setPage] = useState('dashboard');
   const pendingDrafts = drafts.filter((d) => d.status === 'pending').length;
@@ -39,7 +41,7 @@ function Shell() {
 
   const pages: Record<string, ReactElement> = {
     dashboard: <Dashboard />, chats: <Chats />, drafts: <Drafts />, rules: <Rules />, agents: <Agents />,
-    providers: <Providers />, tools: <Tools />, prompts: <Prompts />, memory: <Memory />, skills: <Skills />, logs: <Logs />, yaml: <YamlPage />,
+    providers: <Providers />, tools: <Tools />, scripts: <Scripts />, prompts: <Prompts />, memory: <Memory />, skills: <Skills />, logs: <Logs />, yaml: <YamlPage />,
   };
 
   const driverTag = !status ? null
@@ -69,6 +71,7 @@ function Shell() {
             { key: 'agents', icon: icon(Bot), label: '智能体' },
             { key: 'providers', icon: icon(Cpu), label: '模型 / Harness' },
             { key: 'tools', icon: icon(Wrench), label: '工具 / MCP' },
+            { key: 'scripts', icon: icon(FileCode), label: '脚本' },
             { key: 'prompts', icon: icon(FileText), label: '提示词' },
             { key: 'memory', icon: icon(Brain), label: '记忆' },
             { key: 'skills', icon: icon(Sparkles), label: 'Skill' },
@@ -82,12 +85,26 @@ function Shell() {
         <Header className="drag" style={{ height: 52, lineHeight: '52px', padding: '0 20px', borderBottom: '1px solid #f0f0f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <Space className="no-drag" size={12}>
             {driverTag}
-            {status?.wechat ? <Tag color="green">微信 pid {status.wechat.pid}</Tag> : <Tag color="warning">未找到微信窗口</Tag>}
             {status?.currentChat && <Typography.Text type="secondary">当前会话：{status.currentChat}</Typography.Text>}
           </Space>
           <Space className="no-drag" size={16}>
             {config && (
               <>
+                {APP_IDS.map((id) => {
+                  const st = statuses[id];
+                  const on = config.apps[id].enabled;
+                  return (
+                    <Space key={id} size={6}>
+                      <Tooltip title={`监听${APP_LABELS[id]}。可同时监听多个 App，互不干扰；规则里用「作用于 App」限定范围`}>
+                        <Switch size="small" checked={on} onChange={(v) => void saveConfig((c) => { c.apps[id].enabled = v; }).catch((e) => message.error(errMsg(e)))} />
+                      </Tooltip>
+                      <Typography.Text>{APP_LABELS[id]}</Typography.Text>
+                      {on && (st?.wechat ? <Tag color="green" style={{ marginInlineEnd: 0 }}>pid {st.wechat.pid}</Tag>
+                        : st?.driverError ? <Tooltip title={st.driverError}><Tag color="error" style={{ marginInlineEnd: 0 }}>异常</Tag></Tooltip>
+                        : <Tag color="warning" style={{ marginInlineEnd: 0 }}>未找到窗口</Tag>)}
+                    </Space>
+                  );
+                })}
                 <Tooltip title="默认发送方式：审核后发送 = 生成草稿需确认；自动发送 = 直接发送。可在「会话记录」里为单个会话单独设置，优先级高于此处">
                   <Segmented
                     size="small"
@@ -115,9 +132,9 @@ function Shell() {
                 </Space>
               </>
             )}
-            {status?.running
-              ? <Button icon={<Square size={14} />} onClick={() => void window.relay.stop()}>停止监听</Button>
-              : <Button type="primary" icon={<Play size={14} />} onClick={() => window.relay.start().catch((e) => message.error(errMsg(e)))}>开始监听</Button>}
+            {APP_IDS.some((id) => statuses[id]?.running)
+              ? <Tooltip title="停止所有 App 的监听"><Button icon={<Square size={14} />} onClick={() => void window.relay.stop()}>停止监听</Button></Tooltip>
+              : <Tooltip title="开始监听所有已开启的 App"><Button type="primary" icon={<Play size={14} />} onClick={() => window.relay.start().catch((e) => message.error(errMsg(e)))}>开始监听</Button></Tooltip>}
           </Space>
         </Header>
         <Content style={{ overflow: 'hidden', position: 'relative' }}>

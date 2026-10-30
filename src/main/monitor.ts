@@ -10,7 +10,8 @@ import { ContextWindows } from './agent/window';
 import { CACHE_DIR, CONFIG_PATH, MEDIA_DIR } from './config';
 import { CuaDriver } from './driver';
 import { NOTICE_SENDER, isNotice, patsMe } from './notice';
-import { matchRule } from './rules';
+import { matchRule, isMention } from './rules';
+import type { ScriptTrigger } from './scripting/host';
 import { MAX_PER_CHAT, dropImages, store } from './store';
 import { parseWxTime, stamp } from './timeline';
 import { errText, isNoiseText, logger, sleep } from './util';
@@ -242,7 +243,7 @@ export class Monitor extends EventEmitter {
       foreground: this.cfg.driver.deliveryMode === 'foreground',
       restoreClipboard: this.cfg.general.restoreClipboard,
     }));
-    this.status = { running: false, driver: 'stopped', ticks: 0, replies: 0, busy: false, configPath: CONFIG_PATH };
+    this.status = { app: 'wechat', running: false, driver: 'stopped', ticks: 0, replies: 0, busy: false, configPath: CONFIG_PATH };
   }
 
   setConfig(cfg: AppConfig): void {
@@ -335,8 +336,11 @@ export class Monitor extends EventEmitter {
 
     // 2. Open one unread chat that a reply rule would handle.
     if (canAct && this.cfg.general.openUnreadChats && !this.pending.size) {
-      const row = frame.vision.sessions.find((s) => s.unread && !s.selected && !store.chat(s.name)?.paused &&
-        matchRule(this.cfg, { chat: s.name, isGroup: store.chat(s.name)?.isGroup ?? /[：:]/.test(s.preview), messages: [], mentionedHint: s.mentioned || /拍了拍\s*我/.test(s.preview) }, true)?.action === 'reply');
+      const handled = (s: { name: string; preview: string; mentioned: boolean }) => {
+        const action = matchRule(this.cfg, { chat: s.name, isGroup: store.chat(s.name)?.isGroup ?? /[：:]/.test(s.preview), messages: [], mentionedHint: s.mentioned || /拍了拍\s*我/.test(s.preview) }, true)?.action;
+        return action === 'reply' || action === 'script';
+      };
+      const row = frame.vision.sessions.find((s) => s.unread && !s.selected && !store.chat(s.name)?.paused && handled(s));
       if (row) {
         const unread = Number(/\[(\d+)\s*条\]/.exec(row.preview.replace(/[［］]/g, (c) => (c === '［' ? '[' : ']')))?.[1] ?? 1);
         log.info(`打开未读会话「${row.name}」（${unread} 条）`);
@@ -504,6 +508,15 @@ export class Monitor extends EventEmitter {
     const rule = matchRule(this.cfg, { chat: name, isGroup, messages: incoming });
     if (!rule || rule.action === 'ignore') { log.debug(`「${name}」未命中回复规则${rule ? `（${rule.id}: ignore）` : ''}`); return; }
     if (Date.now() - store.lastReply(name, rule.id) < rule.cooldownSec * 1000) { log.info(`「${name}」规则 ${rule.id} 冷却中`); return; }
+
+    // Script rules do not draft a reply: the new messages go straight to the script (index.ts runs it outside the lock).
+    if (rule.action === 'script' && rule.script) {
+      store.markReply(name, rule.id);
+      const mentionedMe = incoming.some((m) => patsMe(m, me) || (!isNotice(m) && isMention(m.text, me, true)));
+      log.info(`「${name}」规则 ${rule.id} → 脚本 ${rule.script}`);
+      this.emit('script', rule.script, { app: 'wechat', chat: name, isGroup, rule: { id: rule.id, name: rule.name }, messages: incoming, mentionedMe } satisfies ScriptTrigger);
+      return;
+    }
 
     const [lo, hi] = this.cfg.general.replyDelayMs;
     const prev = this.pending.get(name);

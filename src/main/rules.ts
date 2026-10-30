@@ -1,4 +1,4 @@
-import type { AppConfig, ChatMessage, RuleConfig } from '@shared/types';
+import type { AppConfig, AppId, ChatMessage, RuleConfig } from '@shared/types';
 import { isNotice, noticeActor, patsMe } from './notice';
 import { normText } from './wechat';
 
@@ -16,6 +16,8 @@ export function matchPattern(pattern: string, value: string): boolean {
 }
 
 export interface RuleContext {
+  /** The app the chat belongs to (default wechat). */
+  app?: AppId;
   chat: string;
   isGroup: boolean;
   /** New incoming messages (other side). Empty when matching on chat metadata only (unread rows). */
@@ -35,15 +37,18 @@ export function isMention(text: string, nickname: string, includeAtAll: boolean)
  * are treated optimistically so that an unread chat can be opened and then evaluated on its real messages.
  */
 export function matchRule(cfg: AppConfig, ctx: RuleContext, metadataOnly = false): RuleConfig | null {
+  const app = ctx.app ?? 'wechat';
   for (const rule of cfg.rules) {
     if (!rule.enabled) continue;
     const m = rule.match;
+    if (m.apps?.length && !m.apps.includes(app)) continue;
+    if (rule.action === 'script' && !cfg.scripts.some((s) => s.id === rule.script && s.enabled)) continue;
     if (m.chats?.length && !m.chats.some((p) => matchPattern(p, ctx.chat))) continue;
     if (m.excludeChats?.some((p) => matchPattern(p, ctx.chat))) continue;
     if (m.chatType === 'group' && !ctx.isGroup) continue;
     if (m.chatType === 'private' && ctx.isGroup) continue;
     if (!metadataOnly) {
-      const me = cfg.general.myNickname;
+      const me = (app !== 'wechat' && cfg.apps[app].nickname) || cfg.general.myNickname;
       const texts = ctx.messages.map((x) => x.text);
       const senderOf = (x: ChatMessage) => noticeActor(x, me) ?? (isNotice(x) ? undefined : x.sender);
       if (m.senders?.length && !ctx.messages.some((x) => { const s = senderOf(x); return s && m.senders!.some((p) => matchPattern(p, s)); })) continue;

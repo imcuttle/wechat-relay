@@ -1,10 +1,11 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { app, BrowserWindow, dialog, ipcMain, nativeImage, net, Notification, protocol, shell } from 'electron';
-import type { AppConfig, ChatMessage, DebugSection, Draft, Persona, PromptCase, PersonaOptions, RelayEvent, ReplyMode, SyncOptions, TestAgentRequest, TestAgentResult, ToolConfig } from '@shared/types';
+import type { AppConfig, AppId, ChatMessage, DebugSection, Draft, Persona, PromptCase, PersonaOptions, RelayEvent, ReplyMode, ScriptConfig, ScriptTestRequest, ScriptTestResult, SessionRow, SyncOptions, TestAgentRequest, TestAgentResult, ToolConfig } from '@shared/types';
+import { APP_IDS } from '@shared/types';
 import { dream } from './agent/dream';
 import { runAgent, syncHarnesses } from './agent/engine';
 import { acpPool } from './agent/acp';
@@ -17,15 +18,23 @@ import { mcpPool } from './agent/tools';
 import { CONFIG_PATH, configStore, MEDIA_DIR } from './config';
 import { Monitor } from './monitor';
 import { popup } from './popup';
+import { checkScriptId, prepareScript, readScript, scriptDir, scriptFile, scriptTypings } from './scripting/files';
+import { ScriptHost, type ScriptTrigger } from './scripting/host';
 import { store } from './store';
 import { errText, logger } from './util';
 import { personaPromptId } from '@shared/prompt';
 import { visionBinary } from './vision';
 import type { Frame } from './wechat';
+import { WecomMonitor } from './wecom';
 
 const log = logger.scope('app');
 let win: BrowserWindow | null = null;
 let monitor: Monitor;
+let wecom: WecomMonitor;
+let scripts: ScriptHost;
+const monitorOf = (id: AppId) => (id === 'wecom' ? wecom : monitor);
+const targets = (id?: AppId): AppId[] => (id ? [id] : APP_IDS);
+
 
 function send(e: RelayEvent): void {
   if (win && !win.isDestroyed()) win.webContents.send('relay:event', e);
@@ -154,10 +163,10 @@ function setPersona(chat: string, p: { text: string; enabled: boolean; source?: 
 }
 
 function registerIpc(): void {
-  handle('status', () => monitor.getStatus());
-  handle('start', () => monitor.start());
-  handle('stop', () => monitor.stop());
-  handle('tickOnce', () => monitor.tickOnce());
+  handle('status', () => APP_IDS.map((id) => monitorOf(id).getStatus()));
+  handle('start', async (id?: AppId) => { for (const t of targets(id)) if (id || configStore.config.apps[t].enabled) await monitorOf(t).start(); });
+  handle('stop', (id?: AppId) => { for (const t of targets(id)) monitorOf(t).stop(); });
+  handle('tickOnce', async (id?: AppId) => { for (const t of targets(id)) if (monitorOf(t).getStatus().running) await monitorOf(t).tickOnce(); });
   handle('getConfig', () => configStore.config);
   handle('saveConfig', (c: AppConfig) => configStore.save(c));
   handle('getConfigYaml', () => configStore.yaml());
@@ -196,6 +205,36 @@ function registerIpc(): void {
     return (await mcpPool.tools({ ...s, enabled: true })).map((t) => ({ name: t.name, description: t.description }));
   });
   handle('prepareTool', (t: ToolConfig) => prepareScriptTool(t));
+  handle('readScript', (id: string) => readScript(id));
+  handle('writeScript', async (s: ScriptConfig, code: string) => {
+    checkScriptId(s.id);
+    await prepareScript(s, 'save');
+    writeFileSync(scriptFile(s.id), code);
+  });
+  handle('scriptTypings', (id: string) => scriptTypings(id));
+  handle('openScript', async (id: string, how: 'vscode' | 'folder') => {
+    checkScriptId(id);
+    const s = configStore.config.scripts.find((x) => x.id === id) ?? { id, enabled: true, timeoutMs: 120000 };
+    await prepareScript(s, 'save').catch((e) => log.warn(`准备脚本 ${id} 失败：${errText(e)}`));
+    const dir = scriptDir(id);
+    if (how === 'vscode') {
+      const code = await new Promise<number | null>((resolve) => {
+        const c = spawn('/usr/bin/open', ['-a', 'Visual Studio Code', dir], { stdio: 'ignore' });
+        c.on('error', () => resolve(-1));
+        c.on('close', resolve);
+      });
+      if (code === 0) return;
+      log.warn('找不到 Visual Studio Code，改为在访达中打开');
+    }
+    await shell.openPath(dir);
+  });
+  handle('testScript', async (req: ScriptTestRequest): Promise<ScriptTestResult> => {
+    const script = configStore.config.scripts.find((x) => x.id === req.id);
+    if (!script) return { ok: false, error: '请先保存脚本', logs: [], ms: 0 };
+    const msg: ChatMessage = { id: 'test', side: 'other', sender: req.isGroup ? req.sender || '同事' : undefined, text: req.text, at: Date.now(), source: 'ocr' };
+    const trigger: ScriptTrigger = { app: req.app, chat: req.chat, isGroup: req.isGroup, rule: { id: 'test', name: '试运行' }, messages: [msg], mentionedMe: /@/.test(req.text), dryRun: req.dryRun };
+    return scripts.run(script, trigger);
+  });
   const chatNames = () => store.summaries().map((c) => c.name);
   handle('listMemory', () => memorySummaries(chatNames()));
   handle('readMemory', (scope: 'global' | 'session', chat?: string) => readMemory(scope, chat));
@@ -270,6 +309,16 @@ async function reviewInPopup(draft: Draft): Promise<void> {
   }
 }
 
+/** Starts / stops each app's monitor to match `apps.<id>.enabled`. */
+function syncApps(c: AppConfig): void {
+  for (const id of APP_IDS) {
+    const m = monitorOf(id);
+    const running = m.getStatus().running;
+    if (c.apps[id].enabled && !running) void m.start();
+    else if (!c.apps[id].enabled && running) m.stop();
+  }
+}
+
 // Last-resort guard: log instead of showing Electron's modal "JavaScript error in the main process" dialog.
 process.on('uncaughtException', (e) => log.error(`未捕获异常：${e.stack ?? e.message}`));
 process.on('unhandledRejection', (e) => log.error(`未处理的 Promise 拒绝：${errText(e)}`));
@@ -306,6 +355,8 @@ app.whenReady().then(() => {
     syncRuleChats(c);
     syncSkills(c);
     monitor.setConfig(c);
+    wecom.setConfig(c);
+    syncApps(c);
     void mcpPool.closeAll();
     syncHarnesses(c);
     send({ type: 'config', config: c });
@@ -314,9 +365,26 @@ app.whenReady().then(() => {
 
   syncHarnesses(configStore.config);
   monitor = new Monitor(configStore.config, visionBinary(app.getAppPath(), app.isPackaged ? process.resourcesPath : undefined));
-  monitor.on('status', (status) => send({ type: 'status', status }));
+  // 企业微信 shares the Cua Driver connection of the WeChat monitor (one driver process serves both apps).
+  wecom = new WecomMonitor(configStore.config, monitor.driver);
+  scripts = new ScriptHost({
+    config: () => configStore.config,
+    send: async (target, chat, text) => {
+      if (target === 'wecom') throw new Error('企业微信暂不支持通过脚本发送消息');
+      await monitor.sendManual(chat, text);
+    },
+    ocr: async (path) => (await monitor.vision.ocr(path)).text,
+  });
+  for (const m of [monitor, wecom]) {
+    m.on('status', (status) => send({ type: 'status', status }));
+    m.on('chat', (chat, message) => send({ type: 'chat', chat, message }));
+    m.on('script', (id: string, trigger: ScriptTrigger) => scripts.dispatch(id, trigger));
+  }
   monitor.on('frame', sendFrame);
-  monitor.on('chat', (chat, message) => send({ type: 'chat', chat, message }));
+  wecom.on('sessions', (sessions: SessionRow[], tree: string) => {
+    const visible = !!win && !win.isDestroyed() && win.isVisible();
+    send({ type: 'sessions', app: 'wecom', at: Date.now(), sessions, tree: visible ? tree.slice(0, 120_000) : undefined });
+  });
   monitor.on('draft', (draft: Draft) => {
     send({ type: 'draft', draft });
     if (draft.status !== 'pending') return;
@@ -332,10 +400,10 @@ app.whenReady().then(() => {
   registerIpc();
   popup();
   createWindow();
-  void monitor.repairImages().catch((e) => log.warn(`修复图片消息失败：${errText(e)}`)).finally(() => void monitor.start());
+  void monitor.repairImages().catch((e) => log.warn(`修复图片消息失败：${errText(e)}`)).finally(() => syncApps(configStore.config));
 
   app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); });
 });
 
 app.on('window-all-closed', () => { /* keep monitoring in the background on macOS */ if (process.platform !== 'darwin') app.quit(); });
-app.on('before-quit', () => { store.flush(); void monitor?.dispose(); void mcpPool.closeAll(); proxy.close(); prewarm.dispose(); acpPool.dispose(); popup().dispose(); });
+app.on('before-quit', () => { store.flush(); void monitor?.dispose(); wecom?.dispose(); void mcpPool.closeAll(); proxy.close(); prewarm.dispose(); acpPool.dispose(); popup().dispose(); });

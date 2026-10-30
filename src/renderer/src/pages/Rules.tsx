@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Alert, Button, Card, Form, Input, InputNumber, Select, Space, Switch, Tag, Typography, type FormInstance } from 'antd';
 import { ListFilter, Save } from 'lucide-react';
-import type { ChatSummary, RuleConfig } from '@shared/types';
+import type { AppId, ChatSummary, RuleConfig } from '@shared/types';
+import { APP_IDS, APP_LABELS } from '@shared/types';
 import { AskPromptButton } from '../components/AskPrompt';
 import ConfigList from '../components/ConfigList';
 import { useRelay } from '../relay';
@@ -31,6 +32,9 @@ function MatchFields({ form, chats }: { form: FormInstance; chats: ChatSummary[]
 
   return (
     <>
+      <Form.Item name="apps" label="作用于 App（可多选，空 = 全部）" tooltip="规则只对这些聊天软件里的消息生效；可同时监听多个 App，各自用不同规则处理">
+        <Select mode="multiple" allowClear style={{ width: 330 }} placeholder="全部 App" options={APP_IDS.map((id) => ({ value: id, label: APP_LABELS[id] }))} />
+      </Form.Item>
       <Space style={{ display: 'flex' }} align="start" size={24}>
         <Form.Item name="chatType" label="会话类型">
           <Select style={{ width: 140 }} options={Object.entries(TYPE).map(([value, label]) => ({ value, label }))} />
@@ -70,6 +74,7 @@ function MatchFields({ form, chats }: { form: FormInstance; chats: ChatSummary[]
 export default function Rules() {
   const { config, saveConfig, chatVersion } = useRelay();
   const agents = config?.agents ?? [];
+  const scripts = config?.scripts ?? [];
   const [chats, setChats] = useState<ChatSummary[]>([]);
   useEffect(() => { void window.relay.getChats().then(setChats); }, [chatVersion]);
   return (
@@ -91,6 +96,7 @@ export default function Rules() {
           {
             title: '条件', key: 'match', render: (_, r) => (
               <Space size={[4, 4]} wrap>
+                {r.match.apps?.map((a) => <Tag key={a} color="geekblue">{APP_LABELS[a]}</Tag>)}
                 {r.match.chatType && r.match.chatType !== 'any' && <Tag color="blue">{TYPE[r.match.chatType]}</Tag>}
                 {r.match.chats?.map((c) => <Tag key={c}>{c}</Tag>)}
                 {r.match.excludeChats?.map((c) => <Tag key={c} color="default">排除 {c}</Tag>)}
@@ -102,7 +108,9 @@ export default function Rules() {
             ),
           },
           {
-            title: '动作', key: 'action', width: 200, render: (_, r) => r.action === 'ignore' ? <Tag>忽略</Tag> : (
+            title: '动作', key: 'action', width: 200, render: (_, r) => r.action === 'ignore' ? <Tag>忽略</Tag> : r.action === 'script' ? (
+              <Space size={4}><Tag color="gold">脚本</Tag><span className="mono">{r.script}</span></Space>
+            ) : (
               <Space size={4}><Tag color="green">回复</Tag>{r.agent}{r.mode && r.mode !== 'inherit' && <Tag>{r.mode === 'auto' ? '自动' : '审核'}</Tag>}</Space>
             ),
           },
@@ -114,13 +122,16 @@ export default function Rules() {
           const group = chatType !== 'private';
           const mentionOnly = group && Boolean(v.mentionOnly);
           const reply = v.action === 'reply';
+          const script = v.action === 'script';
           return {
             id: String(v.id), name: (v.name as string) || undefined, enabled: Boolean(v.enabled ?? prev?.enabled ?? true),
             action: v.action as RuleConfig['action'],
+            script: script ? (v.script as string) : undefined,
             agent: reply ? (v.agent as string) : undefined,
             mode: reply ? (v.mode as RuleConfig['mode']) : undefined,
-            cooldownSec: reply ? Number(v.cooldownSec ?? 0) : 0,
+            cooldownSec: reply || script ? Number(v.cooldownSec ?? 0) : 0,
             match: {
+              apps: (Array.isArray(v.apps) ? v.apps : []) as AppId[],
               chatType, chats: list(v.chats), excludeChats: list(v.excludeChats), keywords: list(v.keywords),
               mentionOnly, includeAtAll: mentionOnly && Boolean(v.includeAtAll), senders: group ? list(v.senders) : [],
             },
@@ -138,7 +149,13 @@ export default function Rules() {
             <MatchFields form={form} chats={chats} />
             <Typography.Title level={5}>动作</Typography.Title>
             <Space style={{ display: 'flex' }} align="start">
-              <Form.Item name="action" label="动作"><Select style={{ width: 120 }} options={[{ value: 'reply', label: '回复' }, { value: 'ignore', label: '忽略' }]} /></Form.Item>
+              <Form.Item name="action" label="动作"><Select style={{ width: 120 }} options={[{ value: 'reply', label: '回复' }, { value: 'script', label: '脚本' }, { value: 'ignore', label: '忽略' }]} /></Form.Item>
+              <Form.Item noStyle shouldUpdate>{() => form.getFieldValue('action') === 'script' && (
+                <Space align="start">
+                  <Form.Item name="script" label="脚本" rules={[{ required: true }]} tooltip="命中后新消息交给这个脚本，不走 AI 回复；在「脚本」页管理"><Select style={{ width: 220 }} options={scripts.map((s) => ({ value: s.id, label: s.name || s.id }))} /></Form.Item>
+                  <Form.Item name="cooldownSec" label="冷却（秒）"><InputNumber min={0} style={{ width: 110 }} /></Form.Item>
+                </Space>
+              )}</Form.Item>
               <Form.Item noStyle shouldUpdate>{() => form.getFieldValue('action') === 'reply' && (
                 <Space align="start">
                   <Form.Item name="agent" label="智能体" rules={[{ required: true }]}><Select style={{ width: 180 }} options={agents.map((a) => ({ value: a.id, label: a.name || a.id }))} /></Form.Item>

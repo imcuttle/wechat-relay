@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
-import { App, Button, Checkbox, Divider, Dropdown, Empty, Image, Input, List, Popover, Select, Space, Switch, Tag, Tooltip, Typography } from 'antd';
+import { App, Button, Checkbox, Divider, Dropdown, Empty, Image, Input, List, Popover, Segmented, Select, Space, Switch, Tag, Tooltip, Typography } from 'antd';
 import { CheckSquare, Ellipsis, ListChecks, MessagesSquare, Plus, RefreshCw, Send, Sparkles, ThumbsDown, ThumbsUp, Trash, UserRound } from 'lucide-react';
-import type { ChatMessage, ChatSummary, Persona, PromptCase, ReplyMode, SyncOptions } from '@shared/types';
+import { APP_IDS, APP_LABELS, chatName, type AppId, type ChatMessage, type ChatSummary, type Persona, PromptCase, ReplyMode, SyncOptions } from '@shared/types';
 import { applyCase, CaseModal, CasesModal, KIND_LABEL, type CaseDraft, type CaseKind } from '../components/CaseModal';
 import PersonaModal from '../components/PersonaModal';
 import SyncModal from '../components/SyncModal';
 import { errMsg, useRelay } from '../relay';
 
+const APP_COLOR: Record<AppId, string> = { wechat: 'green', wecom: 'geekblue' };
 const MODE_TAG: Record<ReplyMode, string> = { review: '审核', auto: '自动' };
 
 const speakerOf = (m: ChatMessage, chat: string) => (m.side === 'self' ? '我' : m.sender || chat);
@@ -28,6 +29,7 @@ export default function Chats() {
   const { message, modal } = App.useApp();
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [active, setActive] = useState<string | null>(null);
+  const [appFilter, setAppFilter] = useState<'all' | AppId>('all');
   const [history, setHistory] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
@@ -48,7 +50,8 @@ export default function Chats() {
 
   useEffect(() => { void window.relay.getChats().then(setChats); }, [chatVersion]);
   // Nothing selected (first visit, or the selected chat is gone): pick the first chat.
-  useEffect(() => { if (chats.length && !chats.some((c) => c.name === active)) setActive(chats[0].name); }, [chats, active]);
+  const visible = appFilter === 'all' ? chats : chats.filter((c) => c.app === appFilter);
+  useEffect(() => { if (visible.length && !visible.some((c) => c.name === active)) setActive(visible[0].name); }, [visible, active]);
   useEffect(() => { if (active) void window.relay.getHistory(active).then(setHistory); }, [active, chatVersion]);
   useEffect(() => { bottom.current?.scrollIntoView(); }, [history]);
   // A draft belongs to one chat: never carry it over to another one.
@@ -160,7 +163,7 @@ export default function Chats() {
     } catch (e) { message.error(errMsg(e)); }
   };
   const confirmDelete = (names: string[]) => modal.confirm({
-    title: names.length === 1 ? `删除会话「${names[0]}」？` : `删除选中的 ${names.length} 个会话？`,
+    title: names.length === 1 ? `删除会话「${chatName(names[0])}」？` : `删除选中的 ${names.length} 个会话？`,
     content: '本地聊天记录、图片和该会话的发送方式 / 人设开关都会删除，不影响微信。会话人设的提示词仍保留在「提示词」页。之后收到新消息会重新出现。',
     okText: '删除', okButtonProps: { danger: true }, cancelText: '取消',
     onOk: () => deleteChats(names),
@@ -185,14 +188,18 @@ export default function Chats() {
       <div style={{ width: 280, borderRight: '1px solid #f0f0f0', background: '#fff', overflow: 'auto' }}>
         <div style={{ padding: '16px 12px 8px 16px', fontWeight: 600, display: 'flex', gap: 8, alignItems: 'center' }}>
           <MessagesSquare size={16} />会话记录
-          <Typography.Text type="secondary" style={{ fontWeight: 400, fontSize: 12 }}>{chats.length}</Typography.Text>
+          <Typography.Text type="secondary" style={{ fontWeight: 400, fontSize: 12 }}>{visible.length}</Typography.Text>
           <Button size="small" type={picking ? 'link' : 'text'} icon={picking ? undefined : <CheckSquare size={14} />} style={{ marginLeft: 'auto' }} disabled={!chats.length}
             onClick={() => (picking ? stopPicking() : setPicking(true))}>{picking ? '完成' : '批量'}</Button>
         </div>
+        <div style={{ padding: '0 16px 8px' }}>
+          <Segmented size="small" block value={appFilter} onChange={(v) => setAppFilter(v as 'all' | AppId)}
+            options={[{ value: 'all', label: `全部 ${chats.length}` }, ...APP_IDS.map((id) => ({ value: id, label: `${APP_LABELS[id]} ${chats.filter((c) => c.app === id).length}` }))]} />
+        </div>
         {picking && (
           <div className="pick-bar">
-            <Checkbox checked={!!chats.length && picked.size === chats.length} indeterminate={picked.size > 0 && picked.size < chats.length}
-              onChange={(e) => setPicked(e.target.checked ? new Set(chats.map((c) => c.name)) : new Set())}>全选</Checkbox>
+            <Checkbox checked={!!visible.length && visible.every((c) => picked.has(c.name))} indeterminate={visible.some((c) => picked.has(c.name)) && !visible.every((c) => picked.has(c.name))}
+              onChange={(e) => setPicked(e.target.checked ? new Set(visible.map((c) => c.name)) : new Set())}>全选</Checkbox>
             <Typography.Text type="secondary" style={{ fontSize: 12, flex: 1 }}>已选 {picked.size}</Typography.Text>
             <Button size="small" danger type="primary" icon={<Trash size={13} />} disabled={!picked.size} onClick={() => confirmDelete([...picked])}>删除</Button>
           </div>
@@ -206,7 +213,7 @@ export default function Chats() {
           </Tooltip>
         </div>
         <List
-          dataSource={chats}
+          dataSource={visible}
           locale={{ emptyText: <Empty description="还没有识别到会话" /> }}
           renderItem={(c) => (
             <List.Item
@@ -215,7 +222,7 @@ export default function Chats() {
             >
               {picking && <Checkbox checked={picked.has(c.name)} style={{ marginRight: 10 }} />}
               <List.Item.Meta
-                title={<Space size={4}>{c.name}{c.isGroup && <Tag color="blue">群</Tag>}{c.paused && <Tag>已暂停</Tag>}{c.mode !== 'inherit' && <Tag color={c.mode === 'auto' ? 'orange' : 'green'}>{MODE_TAG[c.mode]}</Tag>}{c.ask !== 'inherit' && <Tag color={c.ask === 'on' ? 'cyan' : 'default'}>{c.ask === 'on' ? '询问' : '不询问'}</Tag>}{c.persona?.enabled && <Tooltip title={config?.prompts.find((p) => p.id === c.persona!.prompt)?.name || c.persona.prompt}><Tag color="purple">人设</Tag></Tooltip>}</Space>}
+                title={<Space size={4}>{appFilter === 'all' && <Tag color={APP_COLOR[c.app]} style={{ marginInlineEnd: 0 }}>{APP_LABELS[c.app]}</Tag>}{chatName(c.name)}{c.isGroup && <Tag color="blue">群</Tag>}{c.paused && <Tag>已暂停</Tag>}{c.mode !== 'inherit' && <Tag color={c.mode === 'auto' ? 'orange' : 'green'}>{MODE_TAG[c.mode]}</Tag>}{c.ask !== 'inherit' && <Tag color={c.ask === 'on' ? 'cyan' : 'default'}>{c.ask === 'on' ? '询问' : '不询问'}</Tag>}{c.persona?.enabled && <Tooltip title={config?.prompts.find((p) => p.id === c.persona!.prompt)?.name || c.persona.prompt}><Tag color="purple">人设</Tag></Tooltip>}</Space>}
                 description={<Typography.Text type="secondary" ellipsis style={{ fontSize: 12, maxWidth: 220 }}>{c.lastText}</Typography.Text>}
               />
             </List.Item>
@@ -227,7 +234,8 @@ export default function Chats() {
           <>
             <div className="chat-header">
               <div className="chat-title">
-                <Typography.Text strong ellipsis style={{ fontSize: 15 }}>{current.name}</Typography.Text>
+                {appFilter === 'all' && <Tag color={APP_COLOR[current.app]} style={{ marginInlineEnd: 0 }}>{APP_LABELS[current.app]}</Tag>}
+                <Typography.Text strong ellipsis style={{ fontSize: 15 }}>{chatName(current.name)}</Typography.Text>
                 {current.isGroup && <Tag color="blue" style={{ marginInlineEnd: 0 }}>群</Tag>}
                 <Typography.Text type="secondary" style={{ fontSize: 12, flexShrink: 0 }}>{current.count} 条{syncing ? ' · 同步中…' : ''}</Typography.Text>
               </div>
@@ -293,7 +301,7 @@ export default function Chats() {
                 ) : (
                 <div style={{ marginLeft: m.side === 'self' ? 'auto' : undefined, maxWidth: '70%', display: 'flex', flexDirection: 'column', alignItems: m.side === 'self' ? 'flex-end' : 'flex-start' }}>
                   <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                    {m.side === 'self' ? (m.source === 'bot' ? '机器人' : '我') : m.sender || current.name} · {new Date(m.at).toLocaleString()}
+                    {m.side === 'self' ? (m.source === 'bot' ? '机器人' : '我') : m.sender || chatName(current.name)} · {new Date(m.at).toLocaleString()}
                     {marks.has(m.id) && <Tag color={marks.get(m.id) === 'good' ? 'green' : 'red'} style={{ marginLeft: 6, fontSize: 10, lineHeight: '16px' }}>{KIND_LABEL[marks.get(m.id)!]}</Tag>}
                   </Typography.Text>
                   <div className={`bubble ${m.source === 'bot' ? 'bot' : m.side}`}>
