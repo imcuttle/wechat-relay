@@ -47,7 +47,8 @@ function Shell() {
   const driverTag = !status ? null
     : status.driver === 'ready' ? <Tag color="success">Cua Driver 就绪</Tag>
     : status.driver === 'error' ? <Tooltip title={status.driverError}><Tag color="error">Driver 异常</Tag></Tooltip>
-    : <Tag>{status.driver}</Tag>;
+    : status.driver === 'starting' ? <Tag color="processing">Cua Driver 启动中</Tag>
+    : <Tag>Cua Driver 未启动</Tag>;
 
   return (
     <Layout style={{ height: '100%' }}>

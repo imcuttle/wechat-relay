@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Alert, Button, Card, Form, Input, InputNumber, Select, Space, Switch, Tag, Typography, type FormInstance } from 'antd';
 import { ListFilter, Save } from 'lucide-react';
 import type { AppId, ChatSummary, RuleConfig } from '@shared/types';
-import { APP_IDS, APP_LABELS } from '@shared/types';
+import { APP_IDS, APP_LABELS, chatName } from '@shared/types';
 import { AskPromptButton } from '../components/AskPrompt';
 import ConfigList from '../components/ConfigList';
 import { useRelay } from '../relay';
@@ -11,17 +11,32 @@ const TYPE = { any: '全部', private: '私聊', group: '群聊' };
 type ChatType = keyof typeof TYPE;
 const list = (v: unknown): string[] => (Array.isArray(v) ? v.map((x) => String(x).trim()).filter(Boolean) : []);
 
-/** Tag-style input: free text (wildcards / regex) plus suggestions of chats seen so far, filtered by chat type. */
-function ChatPicker({ chats, type, ...rest }: { chats: ChatSummary[]; type: ChatType; value?: string[]; onChange?: (v: string[]) => void; placeholder?: string }) {
-  const options = chats
-    .filter((c) => type === 'any' || (type === 'group') === c.isGroup)
-    .map((c) => ({ value: c.name, label: <Space size={4}>{c.name}{c.isGroup && <Tag color="blue" style={{ marginInlineEnd: 0 }}>群</Tag>}</Space> }));
+/**
+ * Tag-style input: free text (wildcards / regex) plus suggestions of chats seen so far, filtered by chat type and by the
+ * selected apps. The value is the bare chat name (the rule is matched against the name the monitor reports, not the
+ * record key with its app prefix); the app tag only helps when several apps are suggested at once.
+ */
+function ChatPicker({ chats, type, apps, ...rest }: { chats: ChatSummary[]; type: ChatType; apps?: AppId[]; value?: string[]; onChange?: (v: string[]) => void; placeholder?: string }) {
+  const scoped = chats.filter((c) => (!apps?.length || apps.includes(c.app)) && (type === 'any' || (type === 'group') === c.isGroup));
+  const showApp = !apps?.length || apps.length > 1;
+  const options = [...new Map(scoped.map((c) => [chatName(c.name), c])).values()]
+    .map((c) => ({
+      value: chatName(c.name),
+      label: (
+        <Space size={4}>
+          {chatName(c.name)}
+          {c.isGroup && <Tag color="blue" style={{ marginInlineEnd: 0 }}>群</Tag>}
+          {showApp && <Tag style={{ marginInlineEnd: 0 }}>{APP_LABELS[c.app]}</Tag>}
+        </Space>
+      ),
+    }));
   return <Select mode="tags" style={{ width: 330 }} options={options} tokenSeparators={['\n']} {...rest} />;
 }
 
 /** Conditions whose fields depend on the chat type (and on each other). */
 function MatchFields({ form, chats }: { form: FormInstance; chats: ChatSummary[] }) {
   const type = (Form.useWatch('chatType', form) ?? 'any') as ChatType;
+  const apps = Form.useWatch('apps', form) as AppId[] | undefined;
   const mentionOnly = Form.useWatch('mentionOnly', form) as boolean | undefined;
   const groupish = type !== 'any' ? type === 'group' : true;
   const scope = type === 'any' ? '（仅对群聊生效）' : '';
@@ -50,11 +65,11 @@ function MatchFields({ form, chats }: { form: FormInstance; chats: ChatSummary[]
         )}
       </Space>
       <Space style={{ display: 'flex' }} align="start">
-        <Form.Item name="chats" label={`${noun}（空 = 全部${noun}）`} tooltip="可输入名称、通配符 *（如 工作群*）或 /正则/，回车确认；下拉为已识别过的会话">
-          <ChatPicker chats={chats} type={type} placeholder={`全部${noun}`} />
+        <Form.Item name="chats" label={`${noun}（空 = 全部${noun}）`} tooltip="可输入名称、通配符 *（如 工作群*）或 /正则/，回车确认；下拉为上面 App 里已识别过的会话">
+          <ChatPicker chats={chats} type={type} apps={apps} placeholder={`全部${noun}`} />
         </Form.Item>
         <Form.Item name="excludeChats" label={`排除${noun}`}>
-          <ChatPicker chats={chats} type={type} placeholder="无" />
+          <ChatPicker chats={chats} type={type} apps={apps} placeholder="无" />
         </Form.Item>
       </Space>
       <Space style={{ display: 'flex' }} align="start">
