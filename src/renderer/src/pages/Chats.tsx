@@ -25,11 +25,13 @@ function caseFrom(msgs: ChatMessage[], chat: string): PromptCase {
 }
 
 export default function Chats() {
-  const { chatVersion, config } = useRelay();
+  const { chatVersion, config, statuses } = useRelay();
   const { message, modal } = App.useApp();
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [active, setActive] = useState<string | null>(null);
-  const [appFilter, setAppFilter] = useState<'all' | AppId>('all');
+  // Default tab follows the header: a running app first, else an enabled one. Tracks live until the user picks a tab by hand.
+  const [pickedFilter, setAppFilter] = useState<'all' | AppId | null>(null);
+  const appFilter: 'all' | AppId = pickedFilter ?? APP_IDS.find((id) => statuses[id]?.running) ?? APP_IDS.find((id) => config?.apps[id].enabled) ?? 'all';
   const [history, setHistory] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);

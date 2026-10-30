@@ -17,6 +17,14 @@ const WALK_NODES = 400;
 /** A session that appears in the window for the first time only counts as new when it is among the top rows (freshly updated). */
 const TOP_ROWS = 4;
 
+/** Time label of a session updated within the last couple of minutes. */
+const isFreshTime = (t: string): boolean => {
+  const s = t.trim();
+  if (s === '刚刚' || /^\d+\s*秒前$/.test(s)) return true;
+  const m = /^(\d+)\s*分钟前$/.exec(s);
+  return !!m && Number(m[1]) <= 2;
+};
+
 interface Seen { unread: number; text: string; isGroup: boolean }
 
 /** The screen is locked: accessibility shows nothing until the Mac is unlocked. */
@@ -165,8 +173,9 @@ export class WecomMonitor extends EventEmitter {
       const before = prev?.unread ?? 0;
       // New message = the unread count went up, or the preview changed while the chat is unread (badge capped / count unchanged).
       if (s.unread <= before && !(s.unread > 0 && prev && s.text !== prev.text)) return;
-      // A chat that was not in the previous window: only trust it when it is at the top (it was just updated).
-      if (!prev && index >= TOP_ROWS) return;
+      // A chat that was not in the previous window: only trust it when it was just updated. Pinned chats occupy the top
+      // rows, so the row index alone is not enough: a fresh time label ("刚刚", "N秒前", "1-2分钟前") counts too.
+      if (!prev && index >= TOP_ROWS && !isFreshTime(s.time)) { log.debug(`「${s.name}」是新出现的会话但不在顶部且不是刚更新（第 ${index + 1} 行，${s.time}），已跳过`); return; }
       this.onMessage(s, isGroup, Math.max(0, s.unread - before - 1));
     });
   }
