@@ -168,6 +168,7 @@ export class ScriptHost {
       case 'notify': {
         if (!Notification.isSupported()) return;
         const n = new Notification({ title: str('title') || 'WeChat Relay', body: str('body') });
+        n.on('failed', (_e, error) => log.warn(`系统通知发送失败：${error}`));
         const url = str('url');
         if (url) n.on('click', () => { void shell.openExternal(url); });
         n.show();

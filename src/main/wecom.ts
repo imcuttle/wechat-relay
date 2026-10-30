@@ -12,7 +12,7 @@ const log = logger.scope('wecom');
 const BUNDLE_ID = 'com.tencent.WeWorkMac';
 
 /** Walk budget of one read: the session table is hundreds of rows, the newest ones are at the top. */
-const WALK_MS = 2500;
+const WALK_MS = 5000;
 const WALK_NODES = 400;
 /** A session that appears in the window for the first time only counts as new when it is among the top rows (freshly updated). */
 const TOP_ROWS = 4;
@@ -112,20 +112,26 @@ export class WecomMonitor extends EventEmitter {
     return this.win;
   }
 
-  /** Reads the top of the session list. */
+  /** Reads the top of the session list (a few quick retries when the window subtree came back empty: only the menu bar). */
   private async read(): Promise<{ sessions: WecomSession[]; tree: string }> {
     const w = await this.locate();
-    const res = await this.driver.call('get_window_state', {
-      pid: w.pid, window_id: w.windowId, include_accessibility_tree: true, include_screenshot: false,
-      timeout_ms: WALK_MS, max_elements: WALK_NODES,
-    }, WALK_MS + 10000);
-    const out = structured<{ tree_markdown?: string; degraded?: boolean; degraded_reason?: string }>(res);
-    // While the screen is locked / the screen saver runs, macOS hides every window from accessibility.
-    if (out.degraded && /^screen_locked/.test(out.degraded_reason ?? '')) throw new ScreenLocked('屏幕已锁定，暂停读取企业微信（解锁后自动继续，期间的新消息会补上）');
-    const tree = out.tree_markdown ?? text(res);
-    const sessions = parseSessions(tree);
-    if (!sessions.length) log.debug(`会话列表为空：${out.degraded_reason ?? ''} ${text(res).slice(0, 200)}`);
-    return { sessions, tree };
+    let last = { sessions: [] as WecomSession[], tree: '' };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt) await new Promise((r) => setTimeout(r, 1000));
+      const res = await this.driver.call('get_window_state', {
+        pid: w.pid, window_id: w.windowId, include_accessibility_tree: true, include_screenshot: false,
+        timeout_ms: WALK_MS, max_elements: WALK_NODES,
+      }, WALK_MS + 10000);
+      const out = structured<{ tree_markdown?: string; degraded?: boolean; degraded_reason?: string }>(res);
+      // While the screen is locked / the screen saver runs, macOS hides every window from accessibility.
+      if (out.degraded && /^screen_locked/.test(out.degraded_reason ?? '')) throw new ScreenLocked('屏幕已锁定，暂停读取企业微信（解锁后自动继续，期间的新消息会补上）');
+      const tree = out.tree_markdown ?? text(res);
+      const sessions = parseSessions(tree);
+      if (sessions.length) return { sessions, tree };
+      log.debug(`会话列表为空：${out.degraded_reason ?? ''} ${text(res).slice(0, 200)}`);
+      last = { sessions, tree };
+    }
+    return last;
   }
 
   private async tick(): Promise<void> {
@@ -151,6 +157,8 @@ export class WecomMonitor extends EventEmitter {
     this.baseline = true;
     sessions.forEach((s, index) => {
       const prev = this.seen.get(s.name);
+      // The last row of a cut tree may lack its badge: don't let a missing badge look like "read" (it would re-fire next poll).
+      if (s.tail && prev && s.unread === 0 && s.text === prev.text) return;
       const isGroup = (prev?.isGroup ?? false) || s.isGroup;
       this.seen.set(s.name, { unread: s.unread, text: s.text, isGroup });
       if (first || s.draft || !s.text) return;

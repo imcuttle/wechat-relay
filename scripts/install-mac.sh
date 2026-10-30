@@ -44,6 +44,9 @@ rm -rf "${DEST}"
 cp -R "${BUILT_APP}" "${DEST}"
 # 去除隔离属性，避免 Gatekeeper 拦截(本地 ad-hoc 签名场景)
 xattr -dr com.apple.quarantine "${DEST}" 2>/dev/null || true
+# 重新做 ad-hoc 签名：electron-builder(identity:null) 产出的签名标识是 "Electron" 且未绑定 Info.plist，
+# 通知中心无法按 bundle id 注册该应用，系统通知会被静默丢弃。
+codesign --force --deep --sign - --identifier "dev.cuttleyu.wechat-relay" "${DEST}"
 
 if [ "${LAUNCH}" = "1" ]; then
   echo "==> 4/4 启动 ${APP_NAME}"

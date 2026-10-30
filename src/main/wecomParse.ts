@@ -1,7 +1,8 @@
 // Parsing of 企业微信's session list as the Accessibility tree shows it (markdown rendering of the cua-driver's
 // get_window_state): inside the AXTable every session row is a flat run
 //   name · [tag…] · last message · [unread badge button] · time
-// so rows are cut at the time label. No imports: also run directly by tests.
+// so rows are cut at the time label. The unread badge sits before the time label for some rows and right after it for
+// others (a button with no text pending belongs to the row just closed). No imports: also run directly by tests.
 
 export interface WecomSession {
   /** Chat name. */
@@ -18,6 +19,8 @@ export interface WecomSession {
   /** The preview is my own unsent draft. */
   draft: boolean;
   raw: string;
+  /** Last row of a cut tree: its badge (which can follow the time label) may not have been read yet. */
+  tail?: boolean;
 }
 
 const TIME_RE = /^(刚刚|\d+\s*秒前|\d+\s*分钟前|\d+\s*小时前|昨天(\s*\d{1,2}:\d{2})?|前天|星期[一二三四五六日天]|周[一二三四五六日天]|\d{1,2}:\d{2}|\d{1,2}月\d{1,2}日|\d{2,4}[/.-]\d{1,2}[/.-]\d{1,2}|\d{1,2}\/\d{1,2})$/;
@@ -89,8 +92,12 @@ export function parseSessions(markdown: string): WecomSession[] {
       } else texts.push(v);
     } else if (role === 'AXButton') {
       const b = /^\s*"(\d+)\+?"/.exec(rest);
-      if (b && texts.length) badge = Number(b[1]);
+      if (!b) continue;
+      const n = Number(b[1]);
+      if (texts.length) badge = n;
+      else if (out.length) { const last = out[out.length - 1]; last.unread = Math.max(last.unread, n); }
     }
   }
+  if (out.length) out[out.length - 1].tail = true;
   return out;
 }

@@ -7,8 +7,11 @@ import { errMsg, useRelay } from '../relay';
 export default function Dashboard() {
   const { statuses, config } = useRelay();
   const { message } = App.useApp();
-  const [app, setApp] = useState<AppId>('wechat');
   const running = (id: AppId) => statuses[id]?.running;
+  // Default tab follows the header: a running app first, else an enabled one. Tracks live until the user picks a tab by hand.
+  const [picked, setApp] = useState<AppId | null>(null);
+  const inferred = APP_IDS.find((id) => running(id)) ?? APP_IDS.find((id) => config?.apps[id].enabled) ?? APP_IDS[0];
+  const app = picked ?? inferred;
 
   return (
     <div className="page">
