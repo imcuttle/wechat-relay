@@ -1,12 +1,56 @@
-import { existsSync, readdirSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { existsSync, readdirSync, rmSync } from 'node:fs';
+import { promisify } from 'node:util';
+import { homedir, tmpdir } from 'node:os';
+import { basename, dirname, join } from 'node:path';
+import { app, desktopCapturer, systemPreferences } from 'electron';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { DriverConfig } from '@shared/types';
 import { errText, logger } from './util';
 
 const log = logger.scope('driver');
+const execFileAsync = promisify(execFile);
+
+const HOST_BUNDLE_ID = 'dev.cuttleyu.wechat-relay';
+
+/** cua-driver shipped inside this app (Resources/native when packaged, native/bin in dev). */
+function bundledDriver(): string | null {
+  const candidates = [join(process.resourcesPath ?? '', 'native', 'cua-driver'), join(app.getAppPath(), 'native', 'bin', 'cua-driver')];
+  return candidates.find((c) => existsSync(c)) ?? null;
+}
+
+/** The bare `cua-driver` executable behind an MCP entry point (CodeBuddy's launcher script lives in bin/, the app in vendor/). */
+function driverBinary(command: string): string | null {
+  if (command.endsWith('cua-driver-mcp')) {
+    const bin = join(dirname(dirname(command)), 'vendor/CuaDriver.app/Contents/MacOS/cua-driver');
+    return existsSync(bin) ? bin : null;
+  }
+  return basename(command) === 'cua-driver' ? command : null;
+}
+
+let requestedHostPermissions = false;
+/** Embedded drivers never prompt: macOS checks the host app, so this app has to ask for 辅助功能 / 录屏 itself. */
+function requestHostPermissions(): void {
+  if (requestedHostPermissions || process.platform !== 'darwin') return;
+  requestedHostPermissions = true;
+  try {
+    if (!systemPreferences.isTrustedAccessibilityClient(true)) log.warn('「WeChat Relay」缺少辅助功能权限：请在 系统设置 → 隐私与安全性 → 辅助功能 中打开');
+    if (systemPreferences.getMediaAccessStatus('screen') !== 'granted') {
+      log.warn('「WeChat Relay」缺少录屏权限：请在 系统设置 → 隐私与安全性 → 录屏与系统录音 中打开');
+      void desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 1, height: 1 } }).catch(() => undefined);
+    }
+  } catch (e) { log.debug(`request permissions: ${errText(e)}`); }
+}
+
+/** Socket of the daemon that the bundled `cua-driver-mcp` launcher uses (mirrors bin/lib.sh); null for other entry points. */
+function daemonSocket(command: string): string | null {
+  if (!command.endsWith('cua-driver-mcp')) return null;
+  const stateDir = process.env.CODEBUDDY_PLUGIN_DATA || join(homedir(), 'Library/Caches/codebuddy-desktop/cua-driver');
+  let sock = join(stateDir, 'driver.sock');
+  if (sock.length > 100) sock = join(process.env.TMPDIR || '/tmp', `codebuddy-cua-${process.getuid?.() ?? 0}.sock`);
+  return existsSync(sock) ? sock : null;
+}
 
 /** Locate a cua-driver MCP entry point: CodeBuddy Desktop bundle, CodeBuddy plugin cache, or `cua-driver` on PATH. */
 export function resolveDriver(cfg: DriverConfig): { command: string; args: string[] } | null {
@@ -48,10 +92,15 @@ export class CuaDriver {
   private connecting: Promise<Client> | null = null;
   /** Driver sessions are ended for good when their owner disconnects, so each connection gets a fresh label. */
   private session = '';
+  private entryCommand = '';
+  private lastDaemonRestart = 0;
+  /** Private driver daemon owned by this app (embedded mode); macOS then checks this app's permissions, not CuaDriver's. */
+  private daemon: ChildProcess | null = null;
+  private daemonSock = '';
   constructor(private cfg: DriverConfig) {}
 
   setConfig(cfg: DriverConfig): void {
-    const changed = cfg.command !== this.cfg.command || JSON.stringify(cfg.args) !== JSON.stringify(this.cfg.args);
+    const changed = cfg.command !== this.cfg.command || cfg.embedded !== this.cfg.embedded || JSON.stringify(cfg.args) !== JSON.stringify(this.cfg.args);
     this.cfg = cfg;
     if (changed) void this.close();
   }
@@ -62,10 +111,19 @@ export class CuaDriver {
     if (this.client) return this.client;
     if (this.connecting) return this.connecting;
     this.connecting = (async () => {
-      const entry = resolveDriver(this.cfg);
+      const own = this.cfg.embedded !== false && process.platform === 'darwin' && (!this.cfg.command || this.cfg.command === 'auto') ? bundledDriver() : null;
+      const entry = own ? { command: own, args: [] as string[] } : resolveDriver(this.cfg);
       if (!entry) throw new Error('找不到 cua-driver：请安装 CodeBuddy Desktop，或在配置 driver.command 中指定 cua-driver-mcp 路径');
-      log.info(`starting ${entry.command} ${entry.args.join(' ')}`);
-      const transport = new StdioClientTransport({ command: entry.command, args: entry.args, stderr: 'pipe' });
+      this.entryCommand = entry.command;
+      let { command, args } = entry;
+      const bin = this.cfg.embedded !== false && process.platform === 'darwin' ? (bundledDriver() ?? driverBinary(entry.command)) : null;
+      if (bin) {
+        requestHostPermissions();
+        this.daemonSock = await this.startDaemon(bin);
+        command = bin; args = ['mcp', '--socket', this.daemonSock];
+      }
+      log.info(`starting ${command} ${args.join(' ')}`);
+      const transport = new StdioClientTransport({ command, args, stderr: 'pipe' });
       transport.stderr?.on('data', (d: Buffer) => log.debug(d.toString().trim()));
       const client = new Client({ name: 'wechat-relay', version: '0.1.0' });
       client.onclose = () => { if (this.client === client) { this.client = null; log.warn('driver connection closed'); } };
@@ -91,7 +149,71 @@ export class CuaDriver {
         await this.close();
         return this.call(name, args, timeoutMs, true);
       }
+      // 长期运行的 daemon 读不到之后才授予的 TCC 权限，一直报 permissions_pending；重启 daemon 即可生效。
+      if (!retried && /permissions_pending/i.test(m) && (await this.restartDaemon())) {
+        return this.call(name, args, timeoutMs, true);
+      }
+      if (this.daemon && /permissions_pending/i.test(m)) {
+        throw new Error(`${m}（请在 系统设置 → 隐私与安全性 的「辅助功能」和「录屏与系统录音」中为「WeChat Relay」打开权限）`);
+      }
       throw e;
+    }
+  }
+
+  /** Spawn this app's own driver daemon (`serve --embedded`) on a private socket; returns the socket path. */
+  private async startDaemon(bin: string): Promise<string> {
+    this.stopDaemon();
+    const sock = join(tmpdir(), `wechat-relay-cua-${process.getuid?.() ?? 0}.sock`);
+    // An orphan from a crashed run would keep serving the old socket.
+    await execFileAsync('pkill', ['-f', `serve --embedded --socket ${sock}`]).catch(() => undefined);
+    rmSync(sock, { force: true });
+    const env = { ...process.env, CUA_DRIVER_HOST_BUNDLE_ID: app.isPackaged ? HOST_BUNDLE_ID : 'com.github.Electron' };
+    const child = spawn(bin, ['serve', '--embedded', '--socket', sock], { env, stdio: ['ignore', 'ignore', 'pipe'] });
+    child.stderr?.on('data', (d: Buffer) => log.debug(d.toString().trim()));
+    child.on('exit', (code) => { if (this.daemon === child) { this.daemon = null; log.warn(`driver daemon exited (${code})`); } });
+    this.daemon = child;
+    for (let i = 0; i < 100; i++) {
+      if (existsSync(sock)) return sock;
+      if (this.daemon !== child) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    this.stopDaemon();
+    throw new Error('cua-driver: 内置 daemon 未能在 10 秒内就绪');
+  }
+
+  private stopDaemon(): void {
+    const d = this.daemon; this.daemon = null;
+    if (d && d.exitCode === null) d.kill('SIGTERM');
+    if (this.daemonSock) rmSync(this.daemonSock, { force: true });
+  }
+
+  /** The driver reads macOS permissions once at launch, so a grant made afterwards only counts after a restart. Rate-limited; false if nothing was restarted. */
+  private async restartDaemon(): Promise<boolean> {
+    if (Date.now() - this.lastDaemonRestart < 60_000) return false;
+    this.lastDaemonRestart = Date.now();
+    try {
+      if (this.daemon) {
+        log.warn('cua-driver 报告权限待定（permissions_pending），重启驱动以读取最新授权');
+        await this.close();
+        return true;
+      }
+      // Shared CodeBuddy daemon (embedded: false): restart it for every client.
+      const sock = daemonSocket(this.entryCommand);
+      if (!sock) return false;
+      const { stdout } = await execFileAsync('lsof', ['-t', sock]).catch(() => ({ stdout: '' }));
+      let killed = 0;
+      for (const pid of stdout.split('\n').map((x) => Number(x.trim())).filter((n) => n > 0)) {
+        const { stdout: cmd } = await execFileAsync('ps', ['-o', 'command=', '-p', String(pid)]).catch(() => ({ stdout: '' }));
+        if (/cua-driver\s+serve\b/.test(cmd)) { process.kill(pid, 'SIGTERM'); killed++; }
+      }
+      if (!killed) return false;
+      log.warn('cua-driver 权限状态过期（permissions_pending），已重启共享 daemon');
+      await this.close();
+      await new Promise((r) => setTimeout(r, 1000));
+      return true;
+    } catch (e) {
+      log.warn(`重启 cua-driver 失败：${errText(e)}`);
+      return false;
     }
   }
 
@@ -99,6 +221,7 @@ export class CuaDriver {
     const c = this.client; this.client = null;
     if (c && this.session) await c.callTool({ name: 'end_session', arguments: { session: this.session } }).catch(() => undefined);
     try { await c?.close(); } catch { /* ignore */ }
+    this.stopDaemon();
   }
 }
 

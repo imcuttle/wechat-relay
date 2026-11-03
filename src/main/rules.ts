@@ -24,6 +24,14 @@ export interface RuleContext {
   messages: ChatMessage[];
   /** For unread rows: the list preview says someone @'d me. */
   mentionedHint?: boolean;
+  /**
+   * Some unread messages of the burst could not be read (企业微信 only shows the last one in the session list), so the
+   * visible messages say nothing about senders / keywords: those conditions are treated optimistically and the script
+   * gets `missed > 0` to look further itself. @-mentions still come from the visible text ("[有人@我]" marker).
+   */
+  unseen?: boolean;
+  /** The messages are complete but their senders are unknown (read from an opened chat): sender conditions pass. */
+  senderUnknown?: boolean;
 }
 
 export function isMention(text: string, nickname: string, includeAtAll: boolean): boolean {
@@ -51,8 +59,8 @@ export function matchRule(cfg: AppConfig, ctx: RuleContext, metadataOnly = false
       const me = (app !== 'wechat' && cfg.apps[app].nickname) || cfg.general.myNickname;
       const texts = ctx.messages.map((x) => x.text);
       const senderOf = (x: ChatMessage) => noticeActor(x, me) ?? (isNotice(x) ? undefined : x.sender);
-      if (m.senders?.length && !ctx.messages.some((x) => { const s = senderOf(x); return s && m.senders!.some((p) => matchPattern(p, s)); })) continue;
-      if (m.keywords?.length && !texts.some((t) => m.keywords!.some((k) => (k.startsWith('/') ? matchPattern(k, t) : t.includes(k))))) continue;
+      if (!ctx.unseen && !ctx.senderUnknown && m.senders?.length && !ctx.messages.some((x) => { const s = senderOf(x); return s && m.senders!.some((p) => matchPattern(p, s)); })) continue;
+      if (!ctx.unseen && m.keywords?.length && !texts.some((t) => m.keywords!.some((k) => (k.startsWith('/') ? matchPattern(k, t) : t.includes(k))))) continue;
       // Being patted (拍一拍) addresses me just like an @.
       if (m.mentionOnly && ctx.isGroup && !ctx.messages.some((x) => patsMe(x, me) || (!isNotice(x) && isMention(x.text, me, m.includeAtAll ?? false)))) continue;
     } else if (m.mentionOnly && ctx.isGroup && !ctx.mentionedHint) {

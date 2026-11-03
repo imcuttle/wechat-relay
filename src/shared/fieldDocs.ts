@@ -39,6 +39,7 @@ export const CONFIG_DOCS: Record<string, SectionDoc> = {
     fields: {
       command: { type: '路径', def: 'auto', desc: 'cua-driver 可执行文件路径。', values: { auto: '自动使用 CodeBuddy 自带的 cua-driver' } },
       args: { type: '列表', def: '[]', desc: '启动驱动时附加的命令行参数，一般留空。' },
+      embedded: { type: 'true / false', def: 'true', desc: '驱动作为本应用的独立子进程运行：辅助功能 / 屏幕录制权限授予「WeChat Relay」本身，不依赖 CodeBuddy 的共享驱动。改为 false 则沿用 CodeBuddy 的共享驱动（权限授予 CuaDriver）。', values: { true: '独立驱动（推荐）', false: '共享 CodeBuddy 驱动' } },
       deliveryMode: { type: '字符串', def: 'background', desc: '消息的发送方式。', values: { background: '纯后台操作，不打扰你（部分微信版本可能不接受后台输入）', foreground: '先尝试后台发送；失败或需要搜索时，等你空闲 3 秒后把微信短暂切到前台用快捷键发送，再切回原应用' } },
     },
   },
@@ -164,7 +165,7 @@ export const CONFIG_DOCS: Record<string, SectionDoc> = {
     title: '监听的聊天软件', desc: '可同时监听多个 App，互不干扰；规则的 match.apps 限定作用于哪些 App。写法：apps.wechat / apps.wecom。',
     fields: {
       wechat: { type: '对象', desc: '微信。enabled: 是否监听。' },
-      wecom: { type: '对象', desc: '企微（通过辅助功能树后台读取会话列表，不抢焦点、窗口可隐藏在托盘）。enabled 是否监听；nickname 你在企微里的名字（如 zhangsan），用于识别群里 @我；pollIntervalMs 读取会话列表的间隔。目前只支持脚本动作，不支持 AI 回复和发送。' },
+      wecom: { type: '对象', desc: '企微（通过辅助功能树后台读取会话列表，不抢焦点、窗口可隐藏在托盘）。enabled 是否监听；nickname 你在企微里的名字（如 zhangsan），用于识别群里 @我；pollIntervalMs 读取会话列表的间隔；openMissed（默认 false）漏读了消息、且该会话命中脚本规则时，在后台用窗口菜单「选择下一个未读会话」点开它读出完整消息（不抢焦点，该会话会变为已读，最多经过 3 个未读会话，企微在前台时不切换）。目前只支持脚本动作，不支持 AI 回复和发送。' },
     },
   },
   scripts: {

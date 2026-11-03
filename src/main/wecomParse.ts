@@ -101,3 +101,37 @@ export function parseSessions(markdown: string): WecomSession[] {
   if (out.length) out[out.length - 1].tail = true;
   return out;
 }
+
+export interface PaneElement { role?: string; element_index?: number; parent_index?: number; value?: unknown }
+export interface ChatPane {
+  /** Title of the chat that is open in the window. */
+  title: string;
+  /** Texts of the message cells, oldest first (quotes appear as their own cells; images / files have none). */
+  texts: string[];
+}
+
+/**
+ * The chat that is open in the main window: the AXTable whose children are message text areas (the session list has
+ * none), preceded by the title field. Message order follows the tree, newest last.
+ */
+export function parseChatPane(els: PaneElement[]): ChatPane | null {
+  const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+  let table: PaneElement | null = null;
+  let most = 0;
+  for (const t of els) {
+    if (t.role !== 'AXTable' || t.element_index == null) continue;
+    const n = els.filter((e) => e.role === 'AXTextArea' && e.parent_index === t.element_index && str(e.value).trim()).length;
+    if (n > most) { most = n; table = t; }
+  }
+  if (!table) return null;
+  const before = els.filter((e) => e.role === 'AXTextField' && (e.element_index ?? 0) < table!.element_index! && str(e.value).trim());
+  const title = str(before[before.length - 1]?.value).trim();
+  if (!title) return null;
+  const texts: string[] = [];
+  for (const e of els) {
+    if (e.role !== 'AXTextArea' || e.parent_index !== table.element_index) continue;
+    const v = str(e.value).trim();
+    if (v && texts[texts.length - 1] !== v) texts.push(v);
+  }
+  return { title, texts };
+}

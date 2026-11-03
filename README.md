@@ -28,7 +28,7 @@
 ## 多 App 与脚本
 
 - **同时监听微信和企业微信**：顶栏每个 App 一个开关（配置里是 `apps.wechat.enabled` / `apps.wecom.enabled`），各自独立轮询、互不干扰；前台发送、剪贴板由全局锁串行。规则的 `match.apps`（可多选，空 = 全部）决定规则作用于哪些 App。
-- **企业微信**：通过 Cua Driver 读取辅助功能树里的会话列表（不抢焦点，主窗口可以隐藏在托盘里），某个会话的未读数增加时，把列表里的最后一条消息当作新消息交给规则；一次轮询内连发多条时只看得到最后一条（`ev.missed` 给出漏掉的条数）。目前企业微信只支持「脚本」动作，不支持 AI 回复和发送；屏幕锁定时系统会隐藏所有窗口，暂停读取，解锁后自动补上。群聊 @我 需要在 `apps.wecom.nickname` 填你的名字（如 `zhangsan`）。
+- **企业微信**：通过 Cua Driver 读取辅助功能树里的会话列表（不抢焦点，主窗口可以隐藏在托盘里），某个会话的未读数增加时，把列表里的最后一条消息当作新消息交给规则；一次轮询内连发多条时只看得到最后一条（`ev.missed` 给出漏掉的条数）；漏掉了消息（`missed > 0`）时，规则里的「关键词 / 发送人」条件无法判断，按「可能命中」放行，由脚本自己决定怎么处理（@我 仍按会话列表的「[有人@我]」标记判断）。打开 `apps.wecom.openMissed`（界面：规则页「企微：点开漏读的会话」）后，这类会话会被窗口菜单「选择下一个未读会话」在后台点开（不抢焦点），从聊天窗口的辅助功能树读出完整消息再交给脚本；只对命中脚本规则的会话这样做，被点开的会话在企微里会变为已读，企微在前台时不切换，途中最多经过 3 个未读会话。目前企业微信只支持「脚本」动作，不支持 AI 回复和发送；屏幕锁定时系统会隐藏所有窗口，暂停读取，解锁后自动补上。群聊 @我 需要在 `apps.wecom.nickname` 填你的名字（如 `zhangsan`）。
 - **脚本**：规则动作选「脚本」，命中后新消息交给 `~/.wechat-relay/scripts/<id>/index.ts`。在独立的 Node 进程里运行（优先用 PATH 里的 Node ≥ 22.18，否则用应用内置的 Electron）：可以 `import` 任意 Node 内置模块和 npm 包、读写文件、执行命令；`api` 提供发消息（`api.chat.send` / `api.send`）、调智能体（`api.ai.complete` / `api.ai.reply`）、`api.ask` 弹窗询问、`api.ocr`、`api.notify`、`api.clipboard`、`api.exec`、持久化 `api.state`、互斥 `api.lock`。「脚本」页用 Monaco 编辑，有完整类型提示（SDK 类型来自 `src/shared/scriptSdk.ts`，同时写入脚本目录的 `relay.d.ts`，可用「在 VS Code 打开」直接编辑）；「试运行」用假消息跑一遍，`ev.dryRun` 为真时 `api.send` 会被跳过。
 - 示例：用脚本识别消息里的 PR 链接并自动 approve，不回复消息（鉴权、接口由脚本自己决定）。
 
@@ -36,7 +36,7 @@
 
 - macOS，电脑版微信 4.x，微信主窗口保持打开（可以在后台，不要最小化）
 - Node.js 20+、Xcode Command Line Tools（编译 `wx-vision`）
-- Cua Driver：自动查找 CodeBuddy Desktop / WorkBuddy 自带的 `cua-driver-mcp`，或在配置里用 `driver.command` 指定路径；需要授予「辅助功能」和「屏幕录制」权限
+- Cua Driver：应用自带一份（构建时从 CodeBuddy Desktop 复制），作为子进程独立运行，需要给「WeChat Relay」授予「辅助功能」和「屏幕录制」权限；`driver.embedded: false` 可改用 CodeBuddy 的共享驱动（权限授予 CuaDriver），也可用 `driver.command` 指定路径
 
 ## 开始使用
 

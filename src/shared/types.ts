@@ -20,6 +20,11 @@ export interface AppSettings {
   nickname?: string;
   /** wecom: milliseconds between two reads of the session list. */
   pollIntervalMs?: number;
+  /**
+   * wecom: when messages of a chat that hits a script rule were missed (the session list only shows the last one),
+   * open that chat in the background (window menu "选择下一个未读会话") and read the messages from its pane.
+   */
+  openMissed?: boolean;
 }
 export type AppsConfig = Record<AppId, AppSettings>;
 
@@ -96,6 +101,8 @@ export interface DriverConfig {
   /** Path to cua-driver-mcp (or `cua-driver`), "auto" to detect the one bundled with CodeBuddy. */
   command: string;
   args: string[];
+  /** true = run the Cua Driver as this app's own child (`serve --embedded`), so macOS checks 辅助功能 / 录屏 for WeChat Relay itself. */
+  embedded: boolean;
   deliveryMode: 'background' | 'foreground';
 }
 

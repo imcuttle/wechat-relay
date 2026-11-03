@@ -65,7 +65,7 @@ async function userIdleSeconds(): Promise<number> {
 }
 
 /** Pid of the frontmost app per LaunchServices (the driver's list_apps `active` flag can be stale). */
-async function frontmostPid(): Promise<number> {
+export async function frontmostPid(): Promise<number> {
   const out = await new Promise<string>((resolve, reject) =>
     execFile('/bin/sh', ['-c', 'lsappinfo info -only pid "$(lsappinfo front)"'], (e, so) => (e ? reject(e) : resolve(so))));
   return Number(/"pid"\s*=\s*(\d+)/.exec(out)?.[1] ?? 0);

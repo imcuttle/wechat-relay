@@ -46,7 +46,16 @@ cp -R "${BUILT_APP}" "${DEST}"
 xattr -dr com.apple.quarantine "${DEST}" 2>/dev/null || true
 # 重新做 ad-hoc 签名：electron-builder(identity:null) 产出的签名标识是 "Electron" 且未绑定 Info.plist，
 # 通知中心无法按 bundle id 注册该应用，系统通知会被静默丢弃。
-codesign --force --deep --sign - --identifier "dev.cuttleyu.wechat-relay" "${DEST}"
+# 优先用本机固定的开发者证书：签名身份不变，系统设置里的辅助功能 / 录屏授权在重装后仍然有效；
+# 没有证书时退回 ad-hoc(每次构建身份都变，授权会失效，需要重新授权)。可用 SIGN_IDENTITY 指定证书。
+SIGN_IDENTITY="${SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1)}"
+if [ -n "${SIGN_IDENTITY}" ]; then
+  echo "    签名证书：${SIGN_IDENTITY}"
+  codesign --force --deep --sign "${SIGN_IDENTITY}" --identifier "dev.cuttleyu.wechat-relay" "${DEST}"
+else
+  echo "    未找到开发者证书，使用 ad-hoc 签名(重装后需要重新授权)"
+  codesign --force --deep --sign - --identifier "dev.cuttleyu.wechat-relay" "${DEST}"
+fi
 
 if [ "${LAUNCH}" = "1" ]; then
   echo "==> 4/4 启动 ${APP_NAME}"
@@ -56,4 +65,4 @@ else
 fi
 
 echo "完成。已安装到 ${DEST}"
-echo "提示：识别与操作微信依赖 CodeBuddy Desktop 内置的 Cua Driver，首次使用需在 系统设置 → 隐私与安全性 中为 Cua Driver 打开「辅助功能」和「录屏与系统录音」。"
+echo "提示：WeChat Relay 自带 Cua Driver，首次使用需在 系统设置 → 隐私与安全性 中为「WeChat Relay」打开「辅助功能」和「录屏与系统录音」。"

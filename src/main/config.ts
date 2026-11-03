@@ -47,6 +47,7 @@ general:
 driver:
   command: auto             # auto = 使用 CodeBuddy 内置的 cua-driver
   args: []
+  embedded: true            # true = 驱动作为本应用的子进程运行，辅助功能 / 录屏权限授予「WeChat Relay」；false = 使用 CodeBuddy 的共享驱动 daemon（权限授予 CuaDriver）
   deliveryMode: background  # foreground = 先后台发送，失败或需要搜索时才等你空闲 3 秒，把微信短暂切到前台用快捷键发送，再切回原应用
 
 apps:                       # 要监听的聊天软件，可同时监听，互不干扰；规则里用 match.apps 指定作用于哪些
@@ -56,6 +57,7 @@ apps:                       # 要监听的聊天软件，可同时监听，互�
     enabled: false          # 企业微信：通过辅助功能树读取会话列表（不抢焦点、不需要窗口在前台）
     nickname: ""            # 你在企业微信里的名字（如 zhangsan），用于识别群里 @我；空 = 用 general.myNickname
     pollIntervalMs: 3000
+    openMissed: false       # 漏读了消息（连发多条，会话列表只显示最后一条）且该群命中脚本规则时，在后台点开该会话读取完整消息（窗口菜单「选择下一个未读会话」，不抢焦点，但该会话会被标为已读）
 
 scripts: []                 # TypeScript 脚本，在「脚本」页管理；规则 action: script + script: <id> 触发
 
