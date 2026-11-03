@@ -22,9 +22,11 @@ export interface AppSettings {
   pollIntervalMs?: number;
   /**
    * wecom: when messages of a chat that hits a script rule were missed (the session list only shows the last one),
-   * open that chat in the background (window menu "选择下一个未读会话") and read the messages from its pane.
+   * open that chat in the background (scroll the session list to its row and post a click) and read the messages from its pane.
    */
   openMissed?: boolean;
+  /** wecom: after a script handled a chat's messages successfully, open that chat in the background so WeCom marks it read. */
+  readAfterScript?: boolean;
 }
 export type AppsConfig = Record<AppId, AppSettings>;
 

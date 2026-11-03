@@ -102,7 +102,10 @@ export function parseSessions(markdown: string): WecomSession[] {
   return out;
 }
 
-export interface PaneElement { role?: string; element_index?: number; parent_index?: number; value?: unknown }
+export interface PaneElement {
+  role?: string; element_index?: number; parent_index?: number; value?: unknown; label?: unknown;
+  frame?: { x: number; y: number; w: number; h: number };
+}
 export interface ChatPane {
   /** Title of the chat that is open in the window. */
   title: string;
@@ -112,20 +115,24 @@ export interface ChatPane {
 
 /**
  * The chat that is open in the main window: the AXTable whose children are message text areas (the session list has
- * none), preceded by the title field. Message order follows the tree, newest last.
+ * none), preceded by the title (an AXTextField for some chats, an AXStaticText for others, in the header right of the
+ * session list). Message order follows the tree, newest last.
  */
 export function parseChatPane(els: PaneElement[]): ChatPane | null {
   const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+  const win = els.find((e) => e.role === 'AXWindow' && e.frame)?.frame;
   let table: PaneElement | null = null;
   let most = 0;
   for (const t of els) {
     if (t.role !== 'AXTable' || t.element_index == null) continue;
+    if (win && t.frame && t.frame.x < win.x + 300) continue; // the session list (its text areas are the "外部" tags)
     const n = els.filter((e) => e.role === 'AXTextArea' && e.parent_index === t.element_index && str(e.value).trim()).length;
     if (n > most) { most = n; table = t; }
   }
   if (!table) return null;
-  const before = els.filter((e) => e.role === 'AXTextField' && (e.element_index ?? 0) < table!.element_index! && str(e.value).trim());
-  const title = str(before[before.length - 1]?.value).trim();
+  const header = els.filter((e) => (e.role === 'AXTextField' || e.role === 'AXStaticText') && e.frame && (e.element_index ?? 0) < table!.element_index! &&
+    (!win || (e.frame.x >= win.x + 300 && e.frame.y >= win.y && e.frame.y <= win.y + 60)) && str(e.value ?? e.label).trim());
+  const title = str(header[header.length - 1]?.value ?? header[header.length - 1]?.label).trim();
   if (!title) return null;
   const texts: string[] = [];
   for (const e of els) {

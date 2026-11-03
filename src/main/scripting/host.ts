@@ -31,6 +31,8 @@ export interface ScriptTrigger {
   mentionedMe: boolean;
   missed?: number;
   dryRun?: boolean;
+  /** Called once the run ended (ok = the script finished without error). */
+  onDone?: (ok: boolean) => void;
 }
 
 export function makeEvent(t: ScriptTrigger) {
@@ -58,9 +60,10 @@ export class ScriptHost {
   /** Queues a run of the script behind earlier runs of the same script (they never overlap). Errors are logged + notified. */
   dispatch(scriptId: string, trigger: ScriptTrigger): void {
     const script = this.deps.config().scripts.find((s) => s.id === scriptId);
-    if (!script || !script.enabled) { log.warn(`规则「${trigger.rule.id}」指向的脚本「${scriptId}」不存在或已停用`); return; }
+    if (!script || !script.enabled) { log.warn(`规则「${trigger.rule.id}」指向的脚本「${scriptId}」不存在或已停用`); trigger.onDone?.(false); return; }
     const next = (this.queues.get(script.id) ?? Promise.resolve()).catch(() => undefined).then(async () => {
       const r = await this.run(script, trigger);
+      try { trigger.onDone?.(r.ok); } catch (e) { log.warn(`脚本完成回调失败：${errText(e)}`); }
       if (r.ok) log.info(`脚本 ${script.id} 完成（${r.ms}ms）${r.result ? `：${r.result.slice(0, 200)}` : ''}`);
       else {
         log.error(`脚本 ${script.id} 失败：${r.error}`);

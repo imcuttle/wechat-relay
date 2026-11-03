@@ -164,8 +164,25 @@ export const CONFIG_DOCS: Record<string, SectionDoc> = {
   apps: {
     title: '监听的聊天软件', desc: '可同时监听多个 App，互不干扰；规则的 match.apps 限定作用于哪些 App。写法：apps.wechat / apps.wecom。',
     fields: {
-      wechat: { type: '对象', desc: '微信。enabled: 是否监听。' },
-      wecom: { type: '对象', desc: '企微（通过辅助功能树后台读取会话列表，不抢焦点、窗口可隐藏在托盘）。enabled 是否监听；nickname 你在企微里的名字（如 zhangsan），用于识别群里 @我；pollIntervalMs 读取会话列表的间隔；openMissed（默认 false）漏读了消息、且该会话命中脚本规则时，在后台用窗口菜单「选择下一个未读会话」点开它读出完整消息（不抢焦点，该会话会变为已读，最多经过 3 个未读会话，企微在前台时不切换）。目前只支持脚本动作，不支持 AI 回复和发送。' },
+      wechat: { type: '对象', desc: '微信：通过截图 + OCR 在后台读取。子字段见 apps.wechat（enabled 是否监听）。' },
+      wecom: { type: '对象', desc: '企微：通过辅助功能树在后台读取会话列表，不抢焦点、窗口可隐藏在托盘。子字段见 apps.wecom。目前只支持脚本动作，不支持 AI 回复和发送。' },
+    },
+  },
+  'apps.wechat': {
+    title: '微信', desc: '微信（截图 + OCR）。轮询间隔用全局 general.pollIntervalMs，发送方式见 driver.deliveryMode。',
+    fields: {
+      enabled: { type: 'true / false', def: 'true', desc: '是否监听微信。顶栏的微信开关就是它。' },
+      nickname: { type: '字符串', def: '空', desc: '你在微信里的名字，用于识别群里 @我；空 = 用 general.myNickname。' },
+    },
+  },
+  'apps.wecom': {
+    title: '企业微信', desc: '企业微信（辅助功能树）。每次读取会话列表顶部约 400 个节点，未读数增加的会话，其预览（最后一条消息）当作新消息交给规则。连发多条时中间的消息读不到（脚本里 ev.missed 是漏掉的条数）。',
+    fields: {
+      enabled: { type: 'true / false', def: 'false', desc: '是否监听企微。顶栏的企微开关就是它。' },
+      nickname: { type: '字符串', def: '空', desc: '你在企微里的名字（如 zhangsan），用于识别群里 @我；空 = 用 general.myNickname。会话列表里的「[有人@我]」标记不依赖它。' },
+      pollIntervalMs: { type: '数字（毫秒）', def: '3000', desc: '两次读取会话列表的间隔。读取失败时会按失败次数放大间隔（最多 30 秒）。' },
+      openMissed: { type: 'true / false', def: 'false', desc: '漏读了消息（missed > 0）、且该会话命中脚本规则时，在后台把该会话点开，从聊天窗口读出完整消息，再作为一批交给脚本。关键词 / 发送人条件在漏读时按「可能命中」放行，读到完整消息后再按真实内容重新匹配。', values: { true: '点开漏读的会话（会话在企微里变为已读）', false: '只处理预览里的最后一条' } },
+      readAfterScript: { type: 'true / false', def: 'false', desc: '命中脚本规则（非 ignore，私聊群聊都算）的会话，脚本执行成功后在后台点开它，让企微把它标为已读。脚本失败、会话已无未读时不处理。', values: { true: '执行成功后标为已读', false: '保持未读' } },
     },
   },
   scripts: {
