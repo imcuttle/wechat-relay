@@ -45,6 +45,8 @@ general:
   reviewPopup: false        # 待审核的草稿也用全局弹窗审批（发送 / 编辑 / 拒绝）
 
 driver:
+  enabled: true             # 总开关（界面左上角）：关闭后驱动进程退出，微信 / 企业微信都不再监听、发送
+  idleTimeoutSec: 60        # 驱动空闲多少秒后自动退出，下次需要时再启动；0 = 常驻
   command: auto             # auto = 使用 CodeBuddy 内置的 cua-driver
   args: []
   embedded: true            # true = 驱动作为本应用的子进程运行，辅助功能 / 录屏权限授予「WeChat Relay」；false = 使用 CodeBuddy 的共享驱动 daemon（权限授予 CuaDriver）

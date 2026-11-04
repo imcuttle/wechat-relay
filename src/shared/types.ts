@@ -100,6 +100,10 @@ export type ReviewResult = { action: 'send'; text: string } | { action: 'reject'
 export type PopupResult = AskAnswers | ReviewResult;
 
 export interface DriverConfig {
+  /** Master switch for the Cua Driver (WeChat + 企业微信 share it). false = driver process stopped, nothing is monitored or sent. */
+  enabled: boolean;
+  /** Stop the driver process after this many seconds without a call; it is started again on demand. 0 = keep running. */
+  idleTimeoutSec: number;
   /** Path to cua-driver-mcp (or `cua-driver`), "auto" to detect the one bundled with CodeBuddy. */
   command: string;
   args: string[];

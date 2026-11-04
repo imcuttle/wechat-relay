@@ -97,12 +97,32 @@ export class CuaDriver {
   /** Private driver daemon owned by this app (embedded mode); macOS then checks this app's permissions, not CuaDriver's. */
   private daemon: ChildProcess | null = null;
   private daemonSock = '';
+  private inflight = 0;
+  private idleTimer: NodeJS.Timeout | null = null;
   constructor(private cfg: DriverConfig) {}
 
   setConfig(cfg: DriverConfig): void {
-    const changed = cfg.command !== this.cfg.command || cfg.embedded !== this.cfg.embedded || JSON.stringify(cfg.args) !== JSON.stringify(this.cfg.args);
+    const changed = cfg.enabled !== this.cfg.enabled || cfg.command !== this.cfg.command || cfg.embedded !== this.cfg.embedded || JSON.stringify(cfg.args) !== JSON.stringify(this.cfg.args);
     this.cfg = cfg;
     if (changed) void this.close();
+    else this.armIdle();
+  }
+
+  get enabled(): boolean { return this.cfg.enabled !== false; }
+
+  /** (Re)starts the idle countdown; the driver process is stopped when it expires and is launched again by the next call. */
+  private armIdle(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = null;
+    const sec = this.cfg.idleTimeoutSec ?? 60;
+    if (sec <= 0 || (!this.client && !this.daemon)) return;
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null;
+      if (this.inflight > 0 || this.connecting) return this.armIdle();
+      log.info(`cua-driver 空闲 ${sec} 秒，已退出（下次需要时自动启动）`);
+      void this.close();
+    }, sec * 1000);
+    this.idleTimer.unref?.();
   }
 
   get deliveryMode() { return this.cfg.deliveryMode; }
@@ -130,6 +150,7 @@ export class CuaDriver {
       await client.connect(transport);
       this.session = `wechat-relay-${process.pid}-${Date.now().toString(36)}`;
       await client.callTool({ name: 'start_session', arguments: { session: this.session } }).catch((e) => log.debug(`start_session: ${errText(e)}`));
+      await client.callTool({ name: 'set_agent_cursor_enabled', arguments: { session: this.session, enabled: false } }).catch((e) => log.debug(`hide cursor: ${errText(e)}`));
       this.client = client;
       return client;
     })();
@@ -137,6 +158,12 @@ export class CuaDriver {
   }
 
   async call(name: string, args: Record<string, unknown> = {}, timeoutMs = 30000, retried = false): Promise<ToolResult> {
+    if (!this.enabled) throw new Error('cua-driver: 驱动总开关已关闭（界面左上角可重新打开）');
+    this.inflight++;
+    try { return await this.callOnce(name, args, timeoutMs, retried); } finally { this.inflight--; this.armIdle(); }
+  }
+
+  private async callOnce(name: string, args: Record<string, unknown>, timeoutMs: number, retried: boolean): Promise<ToolResult> {
     const client = await this.connect();
     try {
       const res = (await client.callTool({ name, arguments: { session: this.session, ...args } }, undefined, { timeout: timeoutMs })) as ToolResult;
@@ -147,11 +174,11 @@ export class CuaDriver {
       if (/closed|not connected|EPIPE/i.test(m)) this.client = null;
       if (!retried && /session has ended|unknown session|start_session/i.test(m)) {
         await this.close();
-        return this.call(name, args, timeoutMs, true);
+        return this.callOnce(name, args, timeoutMs, true);
       }
       // 长期运行的 daemon 读不到之后才授予的 TCC 权限，一直报 permissions_pending；重启 daemon 即可生效。
       if (!retried && /permissions_pending/i.test(m) && (await this.restartDaemon())) {
-        return this.call(name, args, timeoutMs, true);
+        return this.callOnce(name, args, timeoutMs, true);
       }
       if (this.daemon && /permissions_pending/i.test(m)) {
         throw new Error(`${m}（请在 系统设置 → 隐私与安全性 的「辅助功能」和「录屏与系统录音」中为「WeChat Relay」打开权限）`);
@@ -218,6 +245,8 @@ export class CuaDriver {
   }
 
   async close(): Promise<void> {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = null;
     const c = this.client; this.client = null;
     if (c && this.session) await c.callTool({ name: 'end_session', arguments: { session: this.session } }).catch(() => undefined);
     try { await c?.close(); } catch { /* ignore */ }

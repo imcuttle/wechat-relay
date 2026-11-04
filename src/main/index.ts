@@ -164,7 +164,7 @@ function setPersona(chat: string, p: { text: string; enabled: boolean; source?: 
 
 function registerIpc(): void {
   handle('status', () => APP_IDS.map((id) => monitorOf(id).getStatus()));
-  handle('start', async (id?: AppId) => { for (const t of targets(id)) if (id || configStore.config.apps[t].enabled) await monitorOf(t).start(); });
+  handle('start', async (id?: AppId) => { if (!configStore.config.driver.enabled) throw new Error('Cua Driver 总开关已关闭，请先在左上角打开'); for (const t of targets(id)) if (id || configStore.config.apps[t].enabled) await monitorOf(t).start(); });
   handle('stop', (id?: AppId) => { for (const t of targets(id)) monitorOf(t).stop(); });
   handle('tickOnce', async (id?: AppId) => { for (const t of targets(id)) if (monitorOf(t).getStatus().running) await monitorOf(t).tickOnce(); });
   handle('getConfig', () => configStore.config);
@@ -314,8 +314,9 @@ function syncApps(c: AppConfig): void {
   for (const id of APP_IDS) {
     const m = monitorOf(id);
     const running = m.getStatus().running;
-    if (c.apps[id].enabled && !running) void m.start();
-    else if (!c.apps[id].enabled && running) m.stop();
+    const want = c.apps[id].enabled && c.driver.enabled;
+    if (want && !running) void m.start();
+    else if (!want && running) m.stop();
   }
 }
 

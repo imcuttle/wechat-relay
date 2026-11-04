@@ -44,7 +44,9 @@ function Shell() {
     providers: <Providers />, tools: <Tools />, scripts: <Scripts />, prompts: <Prompts />, memory: <Memory />, skills: <Skills />, logs: <Logs />, yaml: <YamlPage />,
   };
 
+  const driverOn = config?.driver.enabled !== false;
   const driverTag = !status ? null
+    : !driverOn ? <Tag>Cua Driver 已关闭</Tag>
     : status.driver === 'ready' ? <Tag color="success">Cua Driver 就绪</Tag>
     : status.driver === 'error' ? <Tooltip title={status.driverError}><Tag color="error">Driver 异常</Tag></Tooltip>
     : status.driver === 'starting' ? <Tag color="processing">Cua Driver 启动中</Tag>
@@ -85,6 +87,11 @@ function Shell() {
       <Layout>
         <Header className="drag" style={{ height: 52, lineHeight: '52px', padding: '0 20px', borderBottom: '1px solid #f0f0f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <Space className="no-drag" size={12}>
+            {config && (
+              <Tooltip title="Cua Driver 总开关（微信、企业微信共用）。关闭后驱动进程退出，所有 App 停止监听和发送；空闲时驱动也会自动退出、需要时再启动">
+                <Switch size="small" checked={driverOn} onChange={(v) => void saveConfig((c) => { c.driver.enabled = v; }).catch((e) => message.error(errMsg(e)))} />
+              </Tooltip>
+            )}
             {driverTag}
             {status?.currentChat && <Typography.Text type="secondary">当前会话：{status.currentChat}</Typography.Text>}
           </Space>

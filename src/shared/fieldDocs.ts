@@ -37,6 +37,8 @@ export const CONFIG_DOCS: Record<string, SectionDoc> = {
   driver: {
     title: '驱动（Cua Driver）', desc: '负责在后台操作微信窗口（截图、点击、输入）。',
     fields: {
+      enabled: { type: 'true / false', def: 'true', desc: 'Cua Driver 总开关（界面左上角），微信和企业微信共用。关闭后驱动进程退出，所有 App 都不再监听、发送。' },
+      idleTimeoutSec: { type: '秒', def: '60', desc: '驱动空闲这么久没有任何调用就自动退出，下次需要时再按需启动，省资源。监听进行中会不断轮询，所以不会被回收；0 = 常驻。' },
       command: { type: '路径', def: 'auto', desc: 'cua-driver 可执行文件路径。', values: { auto: '自动使用 CodeBuddy 自带的 cua-driver' } },
       args: { type: '列表', def: '[]', desc: '启动驱动时附加的命令行参数，一般留空。' },
       embedded: { type: 'true / false', def: 'true', desc: '驱动作为本应用的独立子进程运行：辅助功能 / 屏幕录制权限授予「WeChat Relay」本身，不依赖 CodeBuddy 的共享驱动。改为 false 则沿用 CodeBuddy 的共享驱动（权限授予 CuaDriver）。', values: { true: '独立驱动（推荐）', false: '共享 CodeBuddy 驱动' } },
