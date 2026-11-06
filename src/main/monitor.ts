@@ -19,6 +19,8 @@ import { Vision } from './vision';
 import { speakable, synthesize } from './voice';
 import { NotInListError, SafetyStop, WeChat, normText, sameChat, similarity, type Frame } from './wechat';
 
+const LOCKED_MSG = '屏幕已锁定，暂停识别微信（解锁后自动继续；想锁屏也监听请打开顶栏「不休眠」）';
+
 const log = logger.scope('monitor');
 
 /** Limits of syncHistory: at most this many scroll steps / messages. */
@@ -230,6 +232,8 @@ export class Monitor extends EventEmitter {
   /** Chats whose history before the first screen we saw is unknown: scroll up to read it before replying. */
   private needBackfill = new Set<string>();
   private failures = 0;
+  /** The screen is locked: screenshots show the lock screen, so nothing is read or clicked until the unlock. */
+  private screenLocked = false;
   private audio: AudioRig;
   private status: MonitorStatus;
 
@@ -289,6 +293,20 @@ export class Monitor extends EventEmitter {
     log.info('监听已停止');
   }
 
+  /** The screen was locked / unlocked. Unlocking re-activates the monitor: failure state dropped, first poll at once. */
+  setScreenLocked(locked: boolean): void {
+    if (locked === this.screenLocked) return;
+    this.screenLocked = locked;
+    if (!this.status.running) return;
+    if (locked) this.schedule(0); // the loop shows the locked state
+    else {
+      this.failures = 0;
+      this.update({ driver: 'ready', driverError: undefined });
+      log.info('屏幕已解锁，恢复微信识别');
+      this.schedule(0);
+    }
+  }
+
   async dispose(): Promise<void> { this.stop(); this.vision.close(); await this.driver.close(); }
 
   private schedule(ms: number): void {
@@ -298,6 +316,12 @@ export class Monitor extends EventEmitter {
   }
 
   private async loop(): Promise<void> {
+    if (this.screenLocked) {
+      // Also covers a monitor started while the screen was already locked.
+      if (this.status.driverError !== LOCKED_MSG) { log.info(LOCKED_MSG); this.update({ driverError: LOCKED_MSG }); }
+      this.schedule(10_000);
+      return;
+    }
     try {
       await this.lock.run(() => this.tick());
       this.failures = 0;
@@ -315,7 +339,7 @@ export class Monitor extends EventEmitter {
     this.schedule(Math.min(this.cfg.general.pollIntervalMs * Math.max(1, this.failures), 30000));
   }
 
-  tickOnce(): Promise<void> { return this.lock.run(() => this.tick()); }
+  tickOnce(): Promise<void> { this.failures = 0; return this.lock.run(() => this.tick()); }
 
   private async tick(): Promise<void> {
     const t0 = Date.now();

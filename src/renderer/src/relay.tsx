@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { App } from 'antd';
-import type { AppConfig, AppId, ChatMessage, Draft, LogEntry, MonitorStatus, SessionRow, Snapshot } from '@shared/types';
+import type { AppConfig, AppId, ChatMessage, Draft, LogEntry, MonitorStatus, PowerStatus, SessionRow, Snapshot } from '@shared/types';
 
 interface RelayState {
   /** WeChat's status (the dashboard watches its screenshots). */
@@ -8,6 +8,8 @@ interface RelayState {
   /** Status of every app. */
   statuses: Partial<Record<AppId, MonitorStatus>>;
   config: AppConfig | null;
+  /** Screen lock / keep-awake state of the Mac. */
+  power: PowerStatus;
   snapshot: Snapshot | null;
   /** Latest session list of apps without screenshots (wecom). */
   sessions: Partial<Record<AppId, { at: number; rows: SessionRow[]; tree?: string }>>;
@@ -28,6 +30,7 @@ export function RelayProvider({ children }: { children: ReactNode }) {
   const [statuses, setStatuses] = useState<Partial<Record<AppId, MonitorStatus>>>({});
   const status = statuses.wechat ?? null;
   const [config, setConfig] = useState<AppConfig | null>(null);
+  const [power, setPower] = useState<PowerStatus>({ keepAwake: false, locked: false, asleep: false });
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [sessions, setSessions] = useState<RelayState['sessions']>({});
   const [recent, setRecent] = useState<RelayState['recent']>([]);
@@ -42,12 +45,14 @@ export function RelayProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     void window.relay.getStatus().then((list) => setStatuses(Object.fromEntries(list.map((s) => [s.app, s]))));
     void window.relay.getConfig().then(setConfig);
+    void window.relay.getPower().then(setPower);
     void window.relay.getLogs().then(setLogs);
     void reloadDrafts();
     return window.relay.onEvent((e) => {
       switch (e.type) {
         case 'status': setStatuses((s) => ({ ...s, [e.status.app]: e.status })); break;
         case 'config': setConfig(e.config); break;
+        case 'power': setPower(e.power); break;
         case 'snapshot': setSnapshot(e.snapshot); break;
         case 'sessions': setSessions((s) => ({ ...s, [e.app]: { at: e.at, rows: e.sessions, tree: e.tree ?? s[e.app]?.tree } })); break;
         case 'log': setLogs((l) => (l.length > 1500 ? [...l.slice(-1000), e.entry] : [...l, e.entry])); break;
@@ -74,8 +79,8 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     }
   }, [message]);
 
-  const value = useMemo(() => ({ status, statuses, config, snapshot, sessions, recent, logs, drafts, chatVersion, saveConfig, reloadDrafts }),
-    [status, statuses, config, snapshot, sessions, recent, logs, drafts, chatVersion, saveConfig, reloadDrafts]);
+  const value = useMemo(() => ({ status, statuses, config, power, snapshot, sessions, recent, logs, drafts, chatVersion, saveConfig, reloadDrafts }),
+    [status, statuses, config, power, snapshot, sessions, recent, logs, drafts, chatVersion, saveConfig, reloadDrafts]);
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 

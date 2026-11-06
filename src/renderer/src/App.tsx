@@ -23,7 +23,7 @@ const { Sider, Header, Content } = Layout;
 const icon = (I: typeof Activity) => <I size={16} />;
 
 function Shell() {
-  const { status, statuses, config, drafts, saveConfig } = useRelay();
+  const { status, statuses, config, power, drafts, saveConfig } = useRelay();
   const { message } = AntApp.useApp();
   const [page, setPage] = useState('dashboard');
   const pendingDrafts = drafts.filter((d) => d.status === 'pending').length;
@@ -93,6 +93,8 @@ function Shell() {
               </Tooltip>
             )}
             {driverTag}
+            {power.locked && <Tooltip title="屏幕锁定时辅助功能和截图都读不到其他 App，监听已暂停，解锁后自动恢复"><Tag color="warning">屏幕已锁定</Tag></Tooltip>}
+            {power.asleep && <Tag color="warning">电脑休眠中</Tag>}
             {status?.currentChat && <Typography.Text type="secondary">当前会话：{status.currentChat}</Typography.Text>}
           </Space>
           <Space className="no-drag" size={16}>
@@ -128,6 +130,16 @@ function Shell() {
                       size="small"
                       checked={config.general.askUser}
                       onChange={(v) => void saveConfig((c) => { c.general.askUser = v; })}
+                    />
+                  </Space>
+                </Tooltip>
+                <Tooltip title="一键不休眠 / 不锁屏：保持屏幕常亮，阻止空闲休眠和自动锁屏，这样监听不会因为锁屏中断。手动锁屏（⌃⌘Q）、合盖仍会生效。注意：不锁屏意味着你离开时别人能直接使用电脑">
+                  <Space size={6}>
+                    <Typography.Text>不休眠</Typography.Text>
+                    <Switch
+                      size="small"
+                      checked={config.general.keepAwake === true}
+                      onChange={(v) => void saveConfig((c) => { c.general.keepAwake = v; }).catch((e) => message.error(errMsg(e)))}
                     />
                   </Space>
                 </Tooltip>

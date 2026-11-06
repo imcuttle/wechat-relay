@@ -18,6 +18,7 @@ import { mcpPool } from './agent/tools';
 import { CONFIG_PATH, configStore, MEDIA_DIR } from './config';
 import { Monitor } from './monitor';
 import { popup } from './popup';
+import { power } from './power';
 import { checkScriptId, prepareScript, readScript, scriptDir, scriptFile, scriptTypings } from './scripting/files';
 import { ScriptHost, type ScriptTrigger } from './scripting/host';
 import { store } from './store';
@@ -164,6 +165,7 @@ function setPersona(chat: string, p: { text: string; enabled: boolean; source?: 
 
 function registerIpc(): void {
   handle('status', () => APP_IDS.map((id) => monitorOf(id).getStatus()));
+  handle('getPower', () => power.status);
   handle('start', async (id?: AppId) => { if (!configStore.config.driver.enabled) throw new Error('Cua Driver 总开关已关闭，请先在左上角打开'); for (const t of targets(id)) if (id || configStore.config.apps[t].enabled) await monitorOf(t).start(); });
   handle('stop', (id?: AppId) => { for (const t of targets(id)) monitorOf(t).stop(); });
   handle('tickOnce', async (id?: AppId) => { for (const t of targets(id)) if (monitorOf(t).getStatus().running) await monitorOf(t).tickOnce(); });
@@ -357,6 +359,7 @@ app.whenReady().then(() => {
     syncSkills(c);
     monitor.setConfig(c);
     wecom.setConfig(c);
+    power.setKeepAwake(c.general.keepAwake === true);
     syncApps(c);
     void mcpPool.closeAll();
     syncHarnesses(c);
@@ -381,6 +384,12 @@ app.whenReady().then(() => {
     m.on('chat', (chat, message) => send({ type: 'chat', chat, message }));
     m.on('script', (id: string, trigger: ScriptTrigger) => scripts.dispatch(id, trigger));
   }
+  // Screen lock / wake: locked = the monitors wait quietly; unlocked or woken = they re-activate (window re-resolved, poll at once).
+  power.on('change', (p) => send({ type: 'power', power: p }));
+  power.on('locked', (locked: boolean) => { for (const m of [monitor, wecom]) m.setScreenLocked(locked); });
+  power.on('resume', () => { wecom.activate('电脑已唤醒'); });
+  power.init();
+  power.setKeepAwake(configStore.config.general.keepAwake === true);
   monitor.on('frame', sendFrame);
   wecom.on('sessions', (sessions: SessionRow[], tree: string) => {
     const visible = !!win && !win.isDestroyed() && win.isVisible();
@@ -407,4 +416,4 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => { /* keep monitoring in the background on macOS */ if (process.platform !== 'darwin') app.quit(); });
-app.on('before-quit', () => { store.flush(); void monitor?.dispose(); wecom?.dispose(); void mcpPool.closeAll(); proxy.close(); prewarm.dispose(); acpPool.dispose(); popup().dispose(); });
+app.on('before-quit', () => { power.dispose(); store.flush(); void monitor?.dispose(); wecom?.dispose(); void mcpPool.closeAll(); proxy.close(); prewarm.dispose(); acpPool.dispose(); popup().dispose(); });

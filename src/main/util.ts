@@ -98,3 +98,26 @@ export const isNoiseText = (t: string): boolean => {
   return /^(有)?\d+条(新|未读)?消息$/.test(s) || /^\d+条@?我?的?消息$/.test(s) ||
     ['以下为新消息', '以下是新消息', '回到最新', '回到底部', '查看最新消息'].includes(s);
 };
+
+/**
+ * Lets a repeating message through once, then at most once per `everyMs` (a recurring condition must not flood the log).
+ * `pass` returns null when the message is suppressed, else how many repeats were suppressed since the last one that got through.
+ */
+export class LogGate {
+  private seen = new Map<string, { at: number; n: number }>();
+  constructor(private everyMs = 10 * 60_000) {}
+
+  pass(key: string): number | null {
+    const now = Date.now();
+    const s = this.seen.get(key);
+    if (!s) { this.seen.set(key, { at: now, n: 0 }); return 0; }
+    if (now - s.at < this.everyMs) { s.n++; return null; }
+    const n = s.n;
+    s.at = now;
+    s.n = 0;
+    return n;
+  }
+
+  /** The condition is over: its next occurrence is logged again right away. */
+  reset(): void { this.seen.clear(); }
+}

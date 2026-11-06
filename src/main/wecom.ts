@@ -7,7 +7,8 @@ import { CuaDriver, structured, text } from './driver';
 import { isMention, matchRule } from './rules';
 import type { ScriptTrigger } from './scripting/host';
 import { store } from './store';
-import { errText, logger, sleep } from './util';
+import { power } from './power';
+import { errText, LogGate, logger, sleep } from './util';
 import { frontmostPid, sameChat } from './wechat';
 import { parseChatPane, parseSessions, type ChatPane, type PaneElement, type WecomSession } from './wecomParse';
 
@@ -44,6 +45,9 @@ interface Seen { unread: number; text: string; isGroup: boolean }
 
 /** The screen is locked: accessibility shows nothing until the Mac is unlocked. */
 class ScreenLocked extends Error {}
+const LOCKED_MSG = '屏幕已锁定，暂停读取企业微信（解锁后自动继续，期间的新消息会补上；想锁屏也监听请打开顶栏「不休眠」）';
+/** While the screen is locked nothing is read: look again this often (the unlock itself also wakes the poll up). */
+const LOCKED_POLL_MS = 10_000;
 
 /**
  * Watches 企业微信 through its Accessibility tree (read in the background through the Cua Driver: no focus, no pixels,
@@ -58,6 +62,10 @@ export class WecomMonitor extends EventEmitter {
   private failures = 0;
   private win: { pid: number; windowId: number } | null = null;
   private emptyReads = 0;
+  /** The screen is locked (told by the power module): no driver calls, no failures, no log lines until it is unlocked. */
+  private screenLocked = false;
+  /** A condition that repeats every poll (empty tree, ...) is logged once, then rarely. */
+  private gate = new LogGate();
   private seen = new Map<string, Seen>();
   private baseline = false;
   private rows: WecomSession[] = [];
@@ -97,7 +105,34 @@ export class WecomMonitor extends EventEmitter {
 
   dispose(): void { this.stop(); }
 
-  tickOnce(): Promise<void> { return this.tick(); }
+  /** "Identify now": also forgets the cached window and the failure state, so a stale window id is resolved again. */
+  tickOnce(): Promise<void> {
+    this.win = null;
+    this.emptyReads = 0;
+    this.failures = 0;
+    return this.tick();
+  }
+
+  /** The screen was locked / unlocked. Unlocking re-activates the monitor: window re-resolved, polling resumes at once. */
+  setScreenLocked(locked: boolean): void {
+    if (locked === this.screenLocked) return;
+    this.screenLocked = locked;
+    if (!this.status.running) return;
+    if (locked) this.schedule(0); // the loop shows the locked state
+    else this.activate('屏幕已解锁');
+  }
+
+  /** Drops everything that may be stale (window id, failure counters, log gates) and polls right away. */
+  activate(reason: string): void {
+    if (!this.status.running) return;
+    this.win = null;
+    this.emptyReads = 0;
+    this.failures = 0;
+    this.gate.reset();
+    this.update({ driver: 'ready', driverError: undefined });
+    log.info(`${reason}，已重新识别企业微信窗口并恢复监听`);
+    this.schedule(0);
+  }
 
   private interval(): number { return this.cfg.apps.wecom.pollIntervalMs ?? 3000; }
 
@@ -108,6 +143,12 @@ export class WecomMonitor extends EventEmitter {
   }
 
   private async loop(): Promise<void> {
+    if (this.screenLocked) {
+      // Also covers a monitor started while the screen was already locked.
+      if (this.status.driverError !== LOCKED_MSG) { log.info(LOCKED_MSG); this.update({ driver: 'ready', driverError: LOCKED_MSG }); }
+      this.schedule(LOCKED_POLL_MS);
+      return;
+    }
     try {
       await this.tick();
       this.failures = 0;
@@ -116,7 +157,7 @@ export class WecomMonitor extends EventEmitter {
       if (e instanceof ScreenLocked) {
         // Not an error: wait for the unlock (no back-off, the baseline is kept so messages that arrive meanwhile are picked up).
         this.failures = 0;
-        if (this.status.driverError !== e.message) log.info(e.message);
+        if (this.status.driverError !== e.message && this.gate.pass('locked') !== null) log.info(e.message);
         this.update({ driver: 'ready', driverError: e.message });
         this.schedule(this.interval());
         return;
@@ -158,13 +199,19 @@ export class WecomMonitor extends EventEmitter {
       }, WALK_MS + 10000);
       const out = structured<{ tree_markdown?: string; degraded?: boolean; degraded_reason?: string }>(res);
       // While the screen is locked / the screen saver runs, macOS hides every window from accessibility.
-      if (out.degraded && /^screen_locked/.test(out.degraded_reason ?? '')) throw new ScreenLocked('屏幕已锁定，暂停读取企业微信（解锁后自动继续，期间的新消息会补上）');
+      if (out.degraded && /^screen_locked/.test(out.degraded_reason ?? '')) throw new ScreenLocked(LOCKED_MSG);
       const tree = out.tree_markdown ?? text(res);
       const sessions = parseSessions(tree);
-      if (sessions.length) return { sessions, tree };
-      log.debug(`会话列表为空：${out.degraded_reason ?? ''} ${text(res).slice(0, 200)}`);
+      if (sessions.length) { this.gate.reset(); return { sessions, tree }; }
+      const unresolved = /^ax_window_unresolved/.test(out.degraded_reason ?? '');
+      // Every window of another app is hidden behind a locked screen, which the driver reports as an unresolved window.
+      if (unresolved && await power.refreshLocked()) throw new ScreenLocked(LOCKED_MSG);
+      // The same empty read every 3 seconds: log it once, then at most every 10 minutes.
+      const why = unresolved ? 'ax_window_unresolved' : (out.degraded_reason ?? 'empty').split(':')[0];
+      const skipped = this.gate.pass(`empty:${why}`);
+      if (skipped !== null) log.debug(`会话列表为空（${why}）${skipped ? `，期间省略了 ${skipped} 条相同日志` : ''}：${text(res).slice(0, 200)}`);
       // The window id went stale (window recreated / re-parented): resolve it again on the next attempt.
-      if (/^ax_window_unresolved/.test(out.degraded_reason ?? '')) this.win = null;
+      if (unresolved) this.win = null;
       else this.dumpEmptyTree(tree);
       last = { sessions, tree };
     }
@@ -189,7 +236,7 @@ export class WecomMonitor extends EventEmitter {
       this.update({ wechat: this.win ? { pid: this.win.pid, windowId: this.win.windowId, width: 0, height: 0 } : null, ticks: this.status.ticks + 1, lastTickAt: Date.now() });
       if (!sessions.length) {
         // Momentary (window being redrawn / switching views): not worth an error or a back-off; only a persistent failure is.
-        if (++this.emptyReads < 3) { log.debug(`会话列表暂时为空（${this.emptyReads}/3）`); return; }
+        if (++this.emptyReads < 3) return;
         throw new Error('没有读到企业微信的会话列表（是否已登录？首次需要授予辅助功能权限；最近一次的树见 debug/wecom-empty-tree.md）');
       }
       this.emptyReads = 0;

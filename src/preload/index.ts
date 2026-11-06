@@ -5,6 +5,7 @@ const call = (channel: string) => (...args: unknown[]) => ipcRenderer.invoke(cha
 
 const api: RelayApi = {
   getStatus: call('status') as RelayApi['getStatus'],
+  getPower: call('getPower') as RelayApi['getPower'],
   start: call('start') as RelayApi['start'],
   stop: call('stop') as RelayApi['stop'],
   tickOnce: call('tickOnce') as RelayApi['tickOnce'],

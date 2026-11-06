@@ -43,6 +43,7 @@ general:
   askTimeoutSec: 10         # 弹窗等待的秒数（开始操作后停止倒计时）：询问超时视为不回答，审批超时草稿留在「待审核」
   askPrompt: ""             # 开启询问时加进系统提示词的引导（空 = 内置默认：事实不清楚时才问），可用 {{myNickname}} {{chat}} {{askTimeoutSec}} {{#memory}}…{{/memory}}
   reviewPopup: false        # 待审核的草稿也用全局弹窗审批（发送 / 编辑 / 拒绝）
+  keepAwake: false          # 不休眠 / 不锁屏：保持屏幕常亮、阻止空闲休眠和自动锁屏（锁屏后辅助功能和截图都读不到其他 App）。手动锁屏、合盖仍会生效
 
 driver:
   enabled: true             # 总开关（界面左上角）：关闭后驱动进程退出，微信 / 企业微信都不再监听、发送

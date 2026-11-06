@@ -69,6 +69,18 @@ export interface GeneralConfig {
   askPrompt?: string;
   /** Drafts waiting for approval also pop up in the global window (send / edit / reject without opening the app). */
   reviewPopup: boolean;
+  /** Keep the Mac awake with the display on, so it neither sleeps nor locks by itself (accessibility / screenshots stop working on a locked screen). */
+  keepAwake?: boolean;
+}
+
+/** Power / screen state of this Mac as the app sees it. */
+export interface PowerStatus {
+  /** The keep-awake assertion is held (general.keepAwake). */
+  keepAwake: boolean;
+  /** The screen is locked (accessibility and screenshots of other apps are unavailable). */
+  locked: boolean;
+  /** The Mac is asleep (between suspend and resume). */
+  asleep: boolean;
 }
 
 /** AskUserQuestion input, same shape as CodeBuddy / Claude Code's tool. */
@@ -551,7 +563,8 @@ export type RelayEvent =
   | { type: 'sessions'; app: AppId; at: number; sessions: SessionRow[]; /** Raw accessibility tree (markdown) of the window just read. */ tree?: string }
   | { type: 'chat'; chat: string; message?: ChatMessage }
   | { type: 'draft'; draft: Draft }
-  | { type: 'config'; config: AppConfig };
+  | { type: 'config'; config: AppConfig }
+  | { type: 'power'; power: PowerStatus };
 
 /** Test run of a script with a made-up message (dry run: scripts must not change anything outside). */
 export interface ScriptTestRequest { id: string; app: AppId; chat: string; isGroup: boolean; sender?: string; text: string; dryRun: boolean }
@@ -560,6 +573,8 @@ export interface ScriptTestResult { ok: boolean; result?: string; error?: string
 export interface RelayApi {
   /** Status of every app. */
   getStatus(): Promise<MonitorStatus[]>;
+  /** Screen lock / keep-awake state. */
+  getPower(): Promise<PowerStatus>;
   /** app omitted = every enabled app. */
   start(app?: AppId): Promise<void>;
   stop(app?: AppId): Promise<void>;

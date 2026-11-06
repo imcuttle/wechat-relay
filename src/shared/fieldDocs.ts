@@ -32,6 +32,7 @@ export const CONFIG_DOCS: Record<string, SectionDoc> = {
       askTimeoutSec: { type: '秒', def: '10', desc: '弹窗多少秒内没有任何操作就自动关闭：询问视为不回答，草稿留在「待审核」。按键或点击后倒计时停止。' },
       askPrompt: { type: '文本', def: '空（使用内置引导）', desc: '开启询问时加进系统提示词的引导，决定智能体什么时候该问你。默认：回复需要的事实在聊天记录 / 记忆里找不到、也无法确定时才问。可用 {{myNickname}} {{chat}} {{askTimeoutSec}}，{{#memory}}…{{/memory}} 只在开启记忆时出现。' },
       reviewPopup: { type: 'true / false', def: 'false', desc: '待审核的草稿也弹出全局窗口审批：回车发送、E 编辑、Esc 不发送、L 稍后。' },
+      keepAwake: { type: 'true / false', def: 'false', desc: '不休眠 / 不锁屏：保持屏幕常亮，阻止空闲休眠、屏保和由此触发的自动锁屏（等同顶栏「不休眠」开关）。屏幕一旦锁定，辅助功能树和截图都读不到其他 App，监听会暂停；手动锁屏（⌃⌘Q）、合盖、菜单里的睡眠不受影响。注意：不锁屏意味着离开电脑时别人能直接使用。' },
     },
   },
   driver: {
