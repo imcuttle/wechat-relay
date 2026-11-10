@@ -184,7 +184,7 @@ export const CONFIG_DOCS: Record<string, SectionDoc> = {
       enabled: { type: 'true / false', def: 'false', desc: '是否监听企微。顶栏的企微开关就是它。' },
       nickname: { type: '字符串', def: '空', desc: '你在企微里的名字（如 zhangsan），用于识别群里 @我；空 = 用 general.myNickname。会话列表里的「[有人@我]」标记不依赖它。' },
       pollIntervalMs: { type: '数字（毫秒）', def: '3000', desc: '两次读取会话列表的间隔。读取失败时会按失败次数放大间隔（最多 30 秒）。' },
-      openMissed: { type: 'true / false', def: 'false', desc: '漏读了消息（missed > 0）、且该会话命中脚本规则时，在后台把该会话点开，从聊天窗口读出完整消息，再作为一批交给脚本。关键词 / 发送人条件在漏读时按「可能命中」放行，读到完整消息后再按真实内容重新匹配。', values: { true: '点开漏读的会话（会话在企微里变为已读）', false: '只处理预览里的最后一条' } },
+      openMissed: { type: 'true / false', def: 'false', desc: '漏读了消息（missed > 0）、且该会话命中脚本规则时，在后台把该会话点开，从聊天窗口读出完整消息，再作为一批交给脚本。关键词 / 发送人条件在漏读时按「可能命中」放行，读到完整消息后再按真实内容重新匹配。回复（引用）别人消息时，会话列表只显示回复自己的文字：没命中规则、但规则只差关键词时，也会点开会话读取被引用的消息再匹配。', values: { true: '点开漏读的会话（会话在企微里变为已读）', false: '只处理预览里的最后一条' } },
       readAfterScript: { type: 'true / false', def: 'false', desc: '命中脚本规则（非 ignore，私聊群聊都算）的会话，脚本执行成功后在后台点开它，让企微把它标为已读。脚本失败、会话已无未读时不处理。', values: { true: '执行成功后标为已读', false: '保持未读' } },
     },
   },
@@ -211,6 +211,7 @@ export const CONFIG_DOCS: Record<string, SectionDoc> = {
       agent: { type: '字符串', desc: '（action=reply）负责回复的智能体 id，不填用第一个智能体。' },
       mode: { type: '字符串', def: 'inherit', desc: '覆盖通用设置里的 mode。', values: { inherit: '沿用 general.mode', auto: '直接发送', review: '生成草稿待审核' } },
       cooldownSec: { type: '秒', def: '0', desc: '同一会话命中这条规则后，多少秒内不再自动回复。' },
+      scriptDelayMs: { type: '[最小, 最大]', def: '不等待', desc: '（action=script）命中后随机等待多久再运行脚本（毫秒）。不填或 [0, 0] 立即运行；通用设置里的 replyDelayMs 对脚本无效。' },
     },
   },
   'rules.match': {

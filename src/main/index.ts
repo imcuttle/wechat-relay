@@ -370,7 +370,7 @@ app.whenReady().then(() => {
   syncHarnesses(configStore.config);
   monitor = new Monitor(configStore.config, visionBinary(app.getAppPath(), app.isPackaged ? process.resourcesPath : undefined));
   // 企业微信 shares the Cua Driver connection of the WeChat monitor (one driver process serves both apps).
-  wecom = new WecomMonitor(configStore.config, monitor.driver);
+  wecom = new WecomMonitor(configStore.config, monitor.driver, monitor.vision);
   scripts = new ScriptHost({
     config: () => configStore.config,
     send: async (target, chat, text) => {

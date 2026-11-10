@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chatKey, type AppConfig, type ChatMessage, type MonitorStatus, type RuleConfig, type SessionRow } from '@shared/types';
 import { CONFIG_PATH, DATA_DIR } from './config';
@@ -8,9 +9,10 @@ import { isMention, matchRule } from './rules';
 import type { ScriptTrigger } from './scripting/host';
 import { store } from './store';
 import { power } from './power';
+import type { Vision } from './vision';
 import { errText, LogGate, logger, sleep } from './util';
-import { frontmostPid, sameChat } from './wechat';
-import { parseChatPane, parseSessions, type ChatPane, type PaneElement, type WecomSession } from './wecomParse';
+import { frontmostPid, normText, sameChat } from './wechat';
+import { parseChatPane, parseSessions, quotesOf, type ChatPane, type PaneElement, type WecomSession } from './wecomParse';
 
 const log = logger.scope('wecom');
 const BUNDLE_ID = 'com.tencent.WeWorkMac';
@@ -25,7 +27,6 @@ const TOP_ROWS = 4;
 const PANE_MS = 20000;
 const PANE_NODES = 3000;
 /** Geometry of the session list in window points: a header row, then rows of equal height; one wheel "line" moves 48. */
-const LIST_HEADER = 64;
 const ROW_H = 64;
 const WHEEL_LINE = 48;
 /** The list is scrolled until the wanted row is inside [LIST_TOP, window height - LIST_BOTTOM]. */
@@ -79,7 +80,7 @@ export class WecomMonitor extends EventEmitter {
   private handled = new Map<string, string[]>();
   private status: MonitorStatus = { app: 'wecom', running: false, driver: 'stopped', ticks: 0, replies: 0, busy: false, configPath: CONFIG_PATH };
 
-  constructor(private cfg: AppConfig, private driver: CuaDriver) { super(); }
+  constructor(private cfg: AppConfig, private driver: CuaDriver, private vision: Vision) { super(); }
 
   setConfig(cfg: AppConfig): void { this.cfg = cfg; }
 
@@ -288,6 +289,18 @@ export class WecomMonitor extends EventEmitter {
     if (state.paused) return;
 
     const rule = matchRule(this.cfg, { app: 'wecom', chat: s.name, isGroup, messages: [msg], unseen: missed > 0 });
+    if (!rule && this.cfg.apps.wecom.openMissed && !this.recovering.has(s.name)) {
+      // A reply shows only its own text in the list; the quoted message (which a keyword may be in) is in the chat pane.
+      const cand = matchRule(this.cfg, { app: 'wecom', chat: s.name, isGroup, messages: [msg], unseen: true });
+      if (cand?.action === 'script' && cand.script && cand.match.keywords?.length && Date.now() - store.lastReply(key, cand.id) >= cand.cooldownSec * 1000) {
+        this.recovering.add(s.name);
+        this.recoverQueue = this.recoverQueue
+          .then(() => this.recoverQuote(s, isGroup, msg, missed))
+          .catch((e) => log.warn(`「${s.name}」读取引用的消息失败：${errText(e)}`))
+          .finally(() => this.recovering.delete(s.name));
+        return;
+      }
+    }
     if (!rule || rule.action === 'ignore') { log.debug(`「${s.name}」未命中规则${rule ? `（${rule.id}: ignore）` : ''}`); return; }
     if (rule.action !== 'script' || !rule.script) { log.debug(`「${s.name}」规则 ${rule.id} 不是脚本动作，企业微信暂不支持 AI 回复，已跳过`); return; }
     if (Date.now() - store.lastReply(key, rule.id) < rule.cooldownSec * 1000) { log.info(`「${s.name}」规则 ${rule.id} 冷却中`); return; }
@@ -315,52 +328,74 @@ export class WecomMonitor extends EventEmitter {
   }
 
   /** One read of the main window's tree (with an inline screenshot when pixel input will follow). */
-  private async readState(shot: boolean): Promise<{ elements: PaneElement[]; tree: string; shotWidth: number; bounds: { x: number; y: number; width: number; height: number } | null }> {
+  private async readState(shot: boolean): Promise<{ elements: PaneElement[]; tree: string; shotWidth: number; shotHeight: number; image: string; bounds: { x: number; y: number; width: number; height: number } | null }> {
     const w = await this.locate();
     const res = await this.driver.call('get_window_state', {
       pid: w.pid, window_id: w.windowId, include_accessibility_tree: true, include_screenshot: shot, ...(shot ? { max_image_dimension: 1200 } : {}),
       timeout_ms: PANE_MS, max_elements: PANE_NODES,
     }, PANE_MS + 10000);
-    const out = structured<{ elements?: PaneElement[]; tree_markdown?: string; degraded?: boolean; degraded_reason?: string; screenshot_width?: number; window_bounds?: { x: number; y: number; width: number; height: number } }>(res);
+    const out = structured<{ elements?: PaneElement[]; tree_markdown?: string; degraded?: boolean; degraded_reason?: string; screenshot_width?: number; screenshot_height?: number; window_bounds?: { x: number; y: number; width: number; height: number } }>(res);
     if (out.degraded && /^screen_locked/.test(out.degraded_reason ?? '')) throw new ScreenLocked('屏幕已锁定');
     if (shot && !res.content?.some((b) => b.type === 'image')) throw new Error('无法截取企业微信窗口（窗口隐藏在托盘或缺少屏幕录制权限）');
-    return { elements: out.elements ?? [], tree: out.tree_markdown ?? '', shotWidth: out.screenshot_width ?? 0, bounds: out.window_bounds ?? null };
+    return { elements: out.elements ?? [], tree: out.tree_markdown ?? '', shotWidth: out.screenshot_width ?? 0, shotHeight: out.screenshot_height ?? 0, image: res.content?.find((b) => b.type === 'image')?.data ?? '', bounds: out.window_bounds ?? null };
   }
 
-  /** The chat open in the main window with its message texts (null when no chat is open / the tree has no message cells). */
-  private async readPane(): Promise<ChatPane | null> {
-    return parseChatPane((await this.readState(false)).elements);
+  /**
+   * The open chat's pane, and whether it is the chat `name`. Group chats expose their name in the tree; private chats only
+   * expose the subtitle of the header (company / "A7员工"), so the name is looked for in the OCR of the header strip too.
+   */
+  private async readPaneOf(name: string): Promise<{ pane: ChatPane | null; is: boolean }> {
+    const st = await this.readState(true);
+    const pane = parseChatPane(st.elements);
+    if (!pane) return { pane, is: false };
+    if (sameChat(pane.title, name)) return { pane, is: true };
+    const file = join(tmpdir(), `wechat-relay-wecom-${process.pid}.png`);
+    writeFileSync(file, Buffer.from(st.image, 'base64'));
+    const head = (await this.vision.lines(file)).filter((l) => l.x > st.shotWidth * 0.27 && l.y < 160 && l.y > 8);
+    const want = normText(name.replace(/（/g, '(').replace(/）/g, ')'));
+    const is = !!want && head.some((l) => normText(l.text.replace(/（/g, '(').replace(/）/g, ')')).includes(want));
+    return { pane, is };
   }
 
   /**
    * Scrolls the session list (wheel events posted to the window, no focus change) until the row of `name` is on screen and
-   * posts a click on it. `shift` corrects the row geometry (window points). Returns the row index and the list as read.
+   * posts a click on it. The row is located by OCR of the screenshot: the accessibility tree cannot give row positions (rows
+   * without a time label, like "折叠的聊天", are not parsed as rows, and the frames lag behind the screen). The tree only
+   * tells in which direction an off-screen row is.
    */
-  private async clickRow(name: string, shift: number): Promise<{ idx: number; names: string[] } | { why: string }> {
+  private async clickRow(name: string): Promise<{ names: string[] } | { why: string }> {
     const w = await this.locate();
-    // After a scroll the list keeps animating for a moment: click only when two reads in a row see it at the same place.
+    const unwidth = (t: string) => t.replace(/（/g, '(').replace(/）/g, ')');
     let lastY: number | null = null;
     let scrolled = false;
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < 14; i++) {
       const st = await this.readState(true);
-      if (!st.bounds || !st.shotWidth) return { why: '读不到企业微信窗口的位置' };
+      if (!st.bounds || !st.shotWidth || !st.shotHeight || !st.image) return { why: '读不到企业微信窗口的位置' };
       const names = parseSessions(st.tree).map((r) => r.name);
-      const idx = names.findIndex((n) => n === name) >= 0 ? names.findIndex((n) => n === name) : names.findIndex((n) => sameChat(n, name));
-      if (idx < 0) return { why: '会话不在列表里（可能被折叠或太靠后）' };
-      const table = st.elements.find((e) => e.role === 'AXTable' && e.frame && e.frame.x < st.bounds!.x + 300);
-      if (!table?.frame) return { why: '读不到会话列表的位置' };
+      const target = names.findIndex((n) => n === name) >= 0 ? names.findIndex((n) => n === name) : names.findIndex((n) => sameChat(n, name));
+      if (target < 0) return { why: '会话不在列表里（可能被折叠或太靠后）' };
+      const file = join(tmpdir(), `wechat-relay-wecom-${process.pid}.png`);
+      writeFileSync(file, Buffer.from(st.image, 'base64'));
       const k = st.shotWidth / st.bounds.width;
-      const y = table.frame.y - st.bounds.y + LIST_HEADER + idx * ROW_H + ROW_H / 2 + shift;
-      const stable = !scrolled || lastY === table.frame.y;
-      lastY = table.frame.y;
-      if (!stable) { await sleep(500); continue; }
-      if (y >= LIST_TOP && y <= st.bounds.height - LIST_BOTTOM) {
-        await this.driver.call('click', { pid: w.pid, window_id: w.windowId, x: Math.round(LIST_X * k), y: Math.round(y * k), delivery_mode: 'background' });
-        return { idx, names };
+      const lines = (await this.vision.lines(file, st.shotWidth * 0.27)).map((l) => ({ ...l, text: unwidth(l.text) }))
+        .filter((l) => l.y > LIST_TOP * k * 0.8 && l.y < st.shotHeight - 8);
+      const hit = lines.find((l) => l.text.trim() === name) ?? lines.find((l) => l.x > 100 && sameChat(l.text, name));
+      if (hit) {
+        const y = hit.y + hit.h / 2 + ROW_H * k * 0.17; // the name is the upper line of the row: aim at the row's middle
+        const stable = !scrolled || (lastY !== null && Math.abs(lastY - hit.y) < 2);
+        lastY = hit.y;
+        if (!stable) { await sleep(500); continue; }
+        if (y < st.shotHeight - LIST_BOTTOM * k) {
+          await this.driver.call('click', { pid: w.pid, window_id: w.windowId, x: Math.round(LIST_X * k), y: Math.round(y), delivery_mode: 'background' });
+          return { names };
+        }
       }
-      const delta = y - st.bounds.height / 2;
-      const lines = Math.max(1, Math.min(20, Math.round(Math.abs(delta) / WHEEL_LINE)));
-      await this.driver.call('scroll', { pid: w.pid, window_id: w.windowId, x: Math.round(LIST_X * k), y: Math.round((st.bounds.height / 2) * k), direction: delta > 0 ? 'down' : 'up', amount: lines, by: 'line', delivery_mode: 'background' });
+      // Not on screen (or too close to the bottom edge): which way? Compare with the rows that are visible.
+      const visible = names.map((n, idx) => ({ n, idx })).filter(({ n }) => lines.some((l) => l.x > 100 && (l.text.trim() === n || sameChat(l.text, n))));
+      const first = visible.length ? Math.min(...visible.map((v) => v.idx)) : 0;
+      const down = hit ? true : target > first;
+      const lineCount = hit ? 3 : Math.max(1, Math.min(20, Math.round(Math.abs(target - first) * ROW_H / WHEEL_LINE) - 2 || 1));
+      await this.driver.call('scroll', { pid: w.pid, window_id: w.windowId, x: Math.round(LIST_X * k), y: Math.round((st.bounds.height / 2) * k), direction: down ? 'down' : 'up', amount: lineCount, by: 'line', delivery_mode: 'background' });
       scrolled = true;
       lastY = null;
       await sleep(1200);
@@ -398,18 +433,15 @@ export class WecomMonitor extends EventEmitter {
     if ((await frontmostPid()) === w.pid) return { why: '企业微信正在前台使用，不去切换会话' };
     this.holding++;
     try {
-      let pane = await this.readPane();
-      if (pane && sameChat(pane.title, name)) return { pane, already: true };
-      let shift = 0;
+      let { pane, is } = await this.readPaneOf(name);
+      if (pane && is) return { pane, already: true };
       for (let attempt = 0; attempt < 2; attempt++) {
-        const c = await this.clickRow(name, shift);
+        const c = await this.clickRow(name);
         if ('why' in c) return c;
         await sleep(700);
-        pane = await this.readPane();
-        if (pane && sameChat(pane.title, name)) return { pane, already: false };
-        const at = c.names.findIndex((n) => sameChat(n, pane?.title));
-        if (at < 0) break;
-        shift += (c.idx - at) * ROW_H;
+        ({ pane, is } = await this.readPaneOf(name));
+        if (pane && is) return { pane, already: false };
+        log.debug(`点击「${name}」后打开的是「${pane?.title ?? '?'}」，重试`);
       }
       return { why: `点击后打开的是「${pane?.title ?? '?'}」而不是目标会话` };
     } catch (e) {
@@ -428,6 +460,25 @@ export class WecomMonitor extends EventEmitter {
     if (store.ensure(chatKey('wecom', s.name), isGroup).paused) return;
     const hit = matchRule(this.cfg, { app: 'wecom', chat: s.name, isGroup, messages: all, senderUnknown: recovered.length > 0 });
     if (!hit || hit.action !== 'script' || !hit.script) { log.debug(`「${s.name}」读到完整消息后未命中脚本规则`); return; }
+    this.fire(hit, s.name, isGroup, all, Math.max(0, missed - recovered.length));
+  }
+
+  /**
+   * The preview matched no rule only because its keywords are not in the reply's own text: open the chat and look at the
+   * quoted message(s) shown with it (plus the burst that was missed). The quotes go to the rule and the script, not to the history.
+   */
+  private async recoverQuote(s: WecomSession, isGroup: boolean, preview: ChatMessage, missed: number): Promise<void> {
+    const r = await this.openChat(s.name);
+    if ('why' in r) { log.debug(`「${s.name}」没能读取引用的消息：${r.why}`); return; }
+    const recovered = missed > 0 && !r.already ? this.ingest(s, isGroup, this.newTexts(r.pane, s)) : [];
+    const quotes = quotesOf(r.pane.texts, s.text, this.handled.get(s.name) ?? []);
+    if (!quotes.length && !recovered.length) { log.debug(`「${s.name}」没有读到引用的消息`); return; }
+    const quoted: ChatMessage[] = quotes.map((text) => ({ id: store.id(), side: 'other', text, at: Date.now(), source: 'ocr' }));
+    const all = [...recovered, ...quoted, preview];
+    if (store.ensure(chatKey('wecom', s.name), isGroup).paused) return;
+    const hit = matchRule(this.cfg, { app: 'wecom', chat: s.name, isGroup, messages: all, senderUnknown: true });
+    if (!hit || hit.action !== 'script' || !hit.script) { log.debug(`「${s.name}」读到引用的消息后仍未命中脚本规则`); return; }
+    log.info(`「${s.name}」引用的消息命中规则 ${hit.id}：${quotes.join(' ').replace(/\s+/g, ' ').slice(0, 120)}`);
     this.fire(hit, s.name, isGroup, all, Math.max(0, missed - recovered.length));
   }
 

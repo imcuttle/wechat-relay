@@ -16,7 +16,8 @@ export interface CropResult { ok: boolean; error?: string | null; width: number;
 export interface OcrResult { ok: boolean; text: string; width: number; height: number; std: number; flat?: number }
 export interface ClipResult { ok: boolean; error?: string | null; restored?: boolean | null }
 export interface WinInfo { id: number; layer: number; x: number; y: number; w: number; h: number; name?: string | null }
-type Reply = { result?: VisionResult; crop?: CropResult; clip?: ClipResult; windows?: WinInfo[]; luma?: number[]; ocr?: OcrResult };
+export interface OcrLine { text: string; x: number; y: number; w: number; h: number; conf: number }
+type Reply = { result?: VisionResult; crop?: CropResult; clip?: ClipResult; windows?: WinInfo[]; luma?: number[]; ocr?: OcrResult; lines?: OcrLine[] };
 
 /** Long-lived native helper (Apple Vision OCR + WeChat layout analysis + image crops), JSON lines over stdio. */
 export class Vision {
@@ -81,6 +82,11 @@ export class Vision {
   /** OCR of a whole image file (zoomed in), plus its size and luminance spread (std ≈ 0 → blank / black). */
   async ocr(image: string): Promise<OcrResult> {
     return (await this.request({ ocr: { image } }, 15000)).ocr ?? { ok: false, text: '', width: 0, height: 0, std: 0 };
+  }
+
+  /** OCR lines of an image with their boxes (image pixels, y down), only those starting left of `maxX`. */
+  async lines(image: string, maxX?: number): Promise<OcrLine[]> {
+    return (await this.request({ lines: { image, maxX } }, 15000)).lines ?? [];
   }
 
   /** On-screen windows of `pid` (CoreGraphics), including popups the driver's list_windows does not report. */

@@ -664,10 +664,17 @@ func luma(_ r: LumaReq) -> [Int] {
     }
 }
 
-struct Req: Decodable { var id: Int; var image: String?; var scale: Double?; var crop: CropReq?; var clip: ClipReq?; var windows: WinReq?; var luma: LumaReq?; var ocr: OcrReq? }
+/// OCR lines (with boxes, in image pixels) whose left edge is left of `maxX`.
+struct LinesReq: Decodable { var image: String; var maxX: Double? }
+func ocrLines(_ r: LinesReq) -> [Line] {
+    guard let bmp = Bitmap(path: r.image), let ls = try? ocr(bmp) else { return [] }
+    return ls.filter { $0.x < (r.maxX ?? Double(bmp.w)) }
+}
+
+struct Req: Decodable { var id: Int; var image: String?; var scale: Double?; var crop: CropReq?; var clip: ClipReq?; var windows: WinReq?; var luma: LumaReq?; var ocr: OcrReq?; var lines: LinesReq? }
 struct Resp: Encodable {
     var id: Int; var result: Result?; var crop: CropResult?; var clip: ClipResult? = nil
-    var windows: [WinInfo]? = nil; var luma: [Int]? = nil; var ocr: OcrResult? = nil
+    var windows: [WinInfo]? = nil; var luma: [Int]? = nil; var ocr: OcrResult? = nil; var lines: [Line]? = nil
 }
 
 let args = CommandLine.arguments
@@ -679,6 +686,7 @@ if args.count >= 2 && args[1] == "--serve" {
             if let c = req.clip { emit(Resp(id: req.id, result: nil, crop: nil, clip: clipboard(c))) }
             else if let w = req.windows { emit(Resp(id: req.id, result: nil, crop: nil, windows: windows(w))) }
             else if let l = req.luma { emit(Resp(id: req.id, result: nil, crop: nil, luma: luma(l))) }
+            else if let l = req.lines { emit(Resp(id: req.id, result: nil, crop: nil, lines: ocrLines(l))) }
             else if let o = req.ocr { emit(Resp(id: req.id, result: nil, crop: nil, ocr: ocrFile(o))) }
             else if let c = req.crop { emit(Resp(id: req.id, result: nil, crop: crop(c))) }
             else if let image = req.image { emit(Resp(id: req.id, result: analyze(path: image, scaleHint: req.scale), crop: nil)) }

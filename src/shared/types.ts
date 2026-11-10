@@ -345,6 +345,8 @@ export interface RuleConfig {
   /** Overrides general.mode for this rule. */
   mode?: ReplyMode | 'inherit';
   cooldownSec: number;
+  /** action=script: random wait [min, max] ms between the trigger and the script run. Unset / [0, 0] = run at once. */
+  scriptDelayMs?: [number, number];
   /** Send replies of this rule as voice messages (needs voice.enabled). never = text only. */
   voice?: 'inherit' | 'never' | 'always';
 }

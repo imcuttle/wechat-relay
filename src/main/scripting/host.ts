@@ -61,6 +61,14 @@ export class ScriptHost {
   dispatch(scriptId: string, trigger: ScriptTrigger): void {
     const script = this.deps.config().scripts.find((s) => s.id === scriptId);
     if (!script || !script.enabled) { log.warn(`规则「${trigger.rule.id}」指向的脚本「${scriptId}」不存在或已停用`); trigger.onDone?.(false); return; }
+    const [lo, hi] = this.deps.config().rules.find((r) => r.id === trigger.rule.id)?.scriptDelayMs ?? [0, 0];
+    const wait = trigger.dryRun ? 0 : Math.max(0, lo) + Math.random() * Math.max(0, hi - lo);
+    if (wait <= 0) { this.enqueue(script, trigger); return; }
+    log.info(`规则「${trigger.rule.id}」脚本 ${script.id} 将在 ${Math.round(wait)}ms 后运行`);
+    setTimeout(() => this.enqueue(script, trigger), wait);
+  }
+
+  private enqueue(script: ScriptConfig, trigger: ScriptTrigger): void {
     const next = (this.queues.get(script.id) ?? Promise.resolve()).catch(() => undefined).then(async () => {
       const r = await this.run(script, trigger);
       try { trigger.onDone?.(r.ok); } catch (e) { log.warn(`脚本完成回调失败：${errText(e)}`); }

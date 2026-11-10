@@ -131,7 +131,7 @@ export default function Rules() {
           },
         ]}
         defaults={() => ({ id: `rule-${Date.now().toString(36)}`, enabled: true, action: 'reply' as const, agent: agents[0]?.id, mode: 'inherit' as const, cooldownSec: 10, match: { chatType: 'any' as const } })}
-        toForm={(r) => ({ ...r, ...r.match, chatType: r.match.chatType ?? 'any' })}
+        toForm={(r) => ({ ...r, ...r.match, chatType: r.match.chatType ?? 'any', scriptDelayMin: r.scriptDelayMs?.[0] ?? 0, scriptDelayMax: r.scriptDelayMs?.[1] ?? 0 })}
         fromForm={(v, prev): RuleConfig => {
           const chatType = (v.chatType ?? 'any') as ChatType;
           const group = chatType !== 'private';
@@ -145,6 +145,8 @@ export default function Rules() {
             agent: reply ? (v.agent as string) : undefined,
             mode: reply ? (v.mode as RuleConfig['mode']) : undefined,
             cooldownSec: reply || script ? Number(v.cooldownSec ?? 0) : 0,
+            scriptDelayMs: script && Number(v.scriptDelayMax ?? 0) > 0
+              ? [Number(v.scriptDelayMin ?? 0), Math.max(Number(v.scriptDelayMin ?? 0), Number(v.scriptDelayMax))] : undefined,
             match: {
               apps: (Array.isArray(v.apps) ? v.apps : []) as AppId[],
               chatType, chats: list(v.chats), excludeChats: list(v.excludeChats), keywords: list(v.keywords),
@@ -179,6 +181,15 @@ export default function Rules() {
                 </Space>
               )}</Form.Item>
             </Space>
+            <Form.Item noStyle shouldUpdate>{() => form.getFieldValue('action') === 'script' && (
+              <Form.Item label="运行延迟(ms)" tooltip="命中后随机等待这个范围再运行脚本；最大值为 0 = 立即运行。通用设置里的回复延迟对脚本无效">
+                <Space>
+                  <Form.Item name="scriptDelayMin" noStyle><InputNumber min={0} step={500} style={{ width: 120 }} /></Form.Item>
+                  <span>~</span>
+                  <Form.Item name="scriptDelayMax" noStyle><InputNumber min={0} step={500} style={{ width: 120 }} /></Form.Item>
+                </Space>
+              </Form.Item>
+            )}</Form.Item>
           </>
         )}
       />

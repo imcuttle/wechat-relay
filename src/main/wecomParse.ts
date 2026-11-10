@@ -102,6 +102,37 @@ export function parseSessions(markdown: string): WecomSession[] {
   return out;
 }
 
+/** Comparable start of a message text (markers, whitespace and a trailing "…" of truncated previews are dropped). */
+export const cellHead = (t: string): string => t.replace(/^(\[(?:有人@我|@所有人|有人@你)\]\s*)+/, '').replace(/\s+/g, '').replace(/…+$/, '').slice(0, 30);
+
+/** A quoted message's cell starts with its author: "name(中文名):" followed by the quoted text. */
+const QUOTE_CELL = /^[^\n:：]{1,40}[:：](?:\s|$)/;
+
+/**
+ * The quotes of a reply. The session list preview of a reply only has the reply's own text; the quoted message sits in the
+ * chat pane as its own cell(s) right before the reply. Returns the cells between the quote's author line and the (last)
+ * cell that starts like `preview`, unless one of them is a message already seen (`known` heads).
+ */
+export function quotesOf(texts: string[], preview: string, known: string[] = []): string[] {
+  const want = cellHead(preview);
+  if (!want) return [];
+  let at = -1;
+  for (let i = texts.length - 1; i >= 0; i--) {
+    const h = cellHead(texts[i]);
+    if (h && (h.startsWith(want) || want.startsWith(h))) { at = i; break; }
+  }
+  if (at < 0) return [];
+  const seen = new Set(known.map(cellHead));
+  // The quote may be one cell or split by line: walk back to the cell that starts with the author.
+  // (the quoted text can itself contain "xxx: yyy" lines, so the farthest author-looking cell wins)
+  let from = -1;
+  for (let i = at - 1; i >= 0 && i >= at - 3; i--) {
+    if (seen.has(cellHead(texts[i]))) break;
+    if (QUOTE_CELL.test(texts[i])) from = i;
+  }
+  return from < 0 ? [] : texts.slice(from, at);
+}
+
 export interface PaneElement {
   role?: string; element_index?: number; parent_index?: number; value?: unknown; label?: unknown;
   frame?: { x: number; y: number; w: number; h: number };
