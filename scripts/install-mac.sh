@@ -59,7 +59,9 @@ fi
 
 if [ "${LAUNCH}" = "1" ]; then
   echo "==> 4/4 启动 ${APP_NAME}"
-  open "${DEST}"
+  # 若本脚本从 Electron 桌面应用内嵌的终端运行，会继承 ELECTRON_RUN_AS_NODE=1；
+  # open 会把该变量传给新进程，导致 Electron 以纯 Node 模式启动后立即退出（无报错、无窗口）。
+  env -u ELECTRON_RUN_AS_NODE -u NODE_OPTIONS open "${DEST}"
 else
   echo "==> 4/4 跳过启动 (--no-launch)"
 fi

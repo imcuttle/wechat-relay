@@ -7,7 +7,13 @@ export function matchPattern(pattern: string, value: string): boolean {
   const p = pattern.trim();
   if (!p) return false;
   const re = /^\/(.+)\/([a-z]*)$/i.exec(p);
-  if (re) { try { return new RegExp(re[1], re[2]).test(value); } catch { return false; } }
+  if (re) {
+    try { return new RegExp(re[1], re[2]).test(value); }
+    catch {
+      // 正则写坏了（如 /[/、重复 flag /a/gg）：不要静默判不命中，退回下面的普通文本匹配
+      // （* 通配 / normText 精确比较），行为与直接写一条非正则字符串一致。
+    }
+  }
   if (p.includes('*')) {
     const rx = new RegExp(`^${p.split('*').map((s) => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`, 'i');
     return rx.test(value) || rx.test(normText(value));

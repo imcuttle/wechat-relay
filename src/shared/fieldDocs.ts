@@ -215,7 +215,7 @@ export const CONFIG_DOCS: Record<string, SectionDoc> = {
     },
   },
   'rules.match': {
-    title: '规则匹配条件', desc: 'rules[].match 里可以写的条件。',
+    title: '规则匹配条件', desc: 'rules[].match 里可以写的条件。名称/关键词支持精确、* 通配、/正则/；无法编译的正则不再静默判不命中，会退化为普通文本匹配。',
     fields: {
       apps: { type: '列表', desc: '作用于哪些聊天软件（可多选）。不写 = 所有 App。', values: { wechat: '微信', wecom: '企微' }, example: '[wecom]' },
       chats: { type: '列表', desc: '会话名（备注名 / 群名）。支持精确匹配、* 通配符、/正则/。不写 = 所有会话。', example: '[老婆, 订阅号*, /项目.*群/]' },
